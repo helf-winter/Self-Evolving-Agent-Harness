@@ -1,45 +1,84 @@
-# Agent Harness 纵向 MVP 验收
+# Runtime Foundation 人工验收
 
-## 一键离线验收
+## 1. 自动检查
 
 ```bash
-npm install
-npm run doctor
-npm run demo
-npm run typecheck
-npm test
+cd '/mnt/d/code/创业/Agent-Harness'
+npm ci
+npm run check
+claude plugin validate ./plugin
+```
+
+预期：类型检查、全部测试、三个运行时 bundle、插件合约校验和 Claude manifest 校验通过。
+
+## 2. CLI 与项目隔离
+
+```bash
+npm link
+mkdir -p /tmp/harness-project-a /tmp/harness-project-b
+cd /tmp/harness-project-a
+harness project inspect --json
+test ! -e .agent-harness-project.json
+harness taskroot 'Project A task' --json
+test -e .agent-harness-project.json
+harness tree snapshot --json
+
+cd /tmp/harness-project-b
+harness project inspect --json
+harness tree candidates --json
+```
+
+预期：inspect 返回 `new_project` 且不写 marker；taskroot 后创建 marker；Project B 看不到 Project A 的树。
+
+## 3. Claude 插件
+
+```bash
+cd '/mnt/d/code/创业/Agent-Harness'
 npm run build
+claude --plugin-dir ./plugin
 ```
 
-相同门禁也由 GitHub Actions 在 Ubuntu + Node.js 22 上对 `main` 和 Pull Request 自动执行。
+在 Claude 中：
 
-`npm run demo` 覆盖两个端到端场景：
+1. 输入 `/agent-harness:taskroot 实现一个可测试的健康检查接口`。
+2. 要求展示当前 Runtime Snapshot。
+3. 提供一个小型 coding 需求，检查 Claude 是否先询问“新建还是归并”。
+4. 完成局部精炼后，检查是否给出完整 Task Tree 并等待执行确认。
+5. 确认后检查是否先建立 Skeleton，再实现分支。
+6. 退出并重新进入同一目录，查询 Snapshot 和 Trace，确认状态仍存在。
 
-1. 确定性失败 Trace 经过去重、独立 Git worktree 复现和自动策略晋升，形成 active Case。
-2. 确定性成功 Trace 形成 usable Experience 和 testing Skill；testing Skill 不可被生产发现；Validation Agent 对 development、validation、regression、holdout Case 各执行三次无 Skill/有 Skill 配对验证；Controller 将通过者晋升为 completed；召回返回该 Skill；连续两次高严重度回归后 Skill 被自动 quarantined 并退出生产 Registry。
+## 4. 节点执行与 Evaluation
 
-测试使用临时 Git 仓库和独立 worktree，不修改当前仓库内容，也不需要模型账号或网络。
-
-## 真实 Claude Code 验收
+在已完成规划、确认并进入相应执行阶段的 Task Tree 中，记录当前修订 ID、节点 ID 和随后返回的 Attempt ID：
 
 ```bash
-npm run build
-npm run dev -- run
+harness node attempt-start NODE_ID TREE_REVISION_ID --json
+harness node verify ATTEMPT_ID --json
+harness node evidence ATTEMPT_ID REQUIRED_EVIDENCE_KEY TRACE_EVENT_ID --json
+harness node evaluate ATTEMPT_ID succeeded --json
 ```
 
-主执行 Agent 使用用户已登录的 Claude Code。后台独立 Skill 验证不复用该登录；如需启用真实自动验证，单独提供短期、限额的验证凭据：
+预期：
 
-```bash
-export HARNESS_VALIDATION_API_KEY=...
-```
+- Attempt 与精确的 Task Node Revision 绑定，同一节点不能同时启动两个活跃 Attempt；
+- 开始 Attempt 后，该节点自动成为 Hook Trace 的当前节点；
+- Evidence 只能引用 Attempt 开始后产生的同 Project、同 Tree、同 Node Trace；
+- 缺少 required evidence 时，提出 `succeeded` 会得到 `uncertain`，节点继续保持 `verifying`；
+- 失败后可以创建新 Attempt，`failed -> failed -> succeeded` 的全部历史在重启后仍能通过 Task Node Detail 查询；
+- Skeleton Gate 只能引用状态为 `succeeded` 的 Skeleton Attempt。
 
-未提供验证凭据或四类 active Case 不完整时，系统保留 `testing` Skill 并记录未调度原因，不会降级绕过门禁。
+## 5. 安全检查
 
-## 安全断言
+- 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
+- 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
+- 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-- 账本事件只追加，并由数据库触发器阻止更新和删除。
-- 所有 payload 在持久化前脱敏，不保存底层模型完整请求/响应。
-- 生产召回只读取 usable Experience 和 completed Skill。
-- testing、quarantined、deprecated、rejected Skill 均不会导出到生产。
-- Session 删除不级联删除 Trace、Case、Experience、Skill 或 Validation Run。
-- Case 与 Validation 使用精确的临时 worktree 路径并在运行后清理。
+## 6. 当前不作为验收失败的范围
+
+- Evolution 自动结论与经验晋升；
+- 失败案例 L0-L4 自动化；
+- Task Node Replacement、Drift 检测与 Effect Disposal；
+- 项目 Clone/迁移自动改写；
+- 完整 AST/符号调用图；
+- Codex 等其他 Agent Runtime Binding；
+- 图形界面。

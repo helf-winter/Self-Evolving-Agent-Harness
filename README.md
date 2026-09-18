@@ -1,229 +1,97 @@
-# Agent Harness
+# Self-Evolving Agent Harness
 
-基于 Claude Code 的研发流程 Harness。项目目标是把研发任务执行记录为可追溯 Trace，将失败沉淀为可复现 Case，将经过验证的成功模式演化为可自动验证、晋升和隔离的 Skill。
+Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前状态：首个 TypeScript 测试失败修复场景已形成端到端闭环；失败可沉淀为 Case，成功可演化为 Experience 和 Skill，Skill 经独立验证后自动晋升，并能在生产回归后自动隔离。
+当前版本实现 Runtime Foundation 以及 Node Execution & Evaluation 两个纵向切片：
 
-## 当前已实现
-
-- Session、Task、Trace、Turn、Stage、Step 和 Attempt 的标识约束。
-- Turn 与 Task 多对多关联的架构定义。
-- Task 内递归 TaskNode 树、DFS/BFS 遍历选择和 CLI 查询。
-- 新 Trace 自动初始化根 TaskNode，复杂任务可直接从根节点继续递归分解。
-- 确定性研发阶段状态机。
-- 写入前字段及内联凭据脱敏。
-- SQLite WAL 追加事件账本。
-- 事件幂等写入、ID 冲突检测和哈希链校验。
-- 数据库级事件更新和删除保护。
-- Claude Code、Node、Git 与 Bash 环境诊断。
-- Session、Task、Turn、Trace 的可重放查询投影。
-- Claude Code Session、Prompt、工具和 Stop Hook Adapter。
-- `harness` / `harness agent-run` 启动入口和 `harness trace` 查询命令；`controlled-run` 仅作为旧兼容别名保留。
-- Harness Agent mode 下的 Hook 安全带：Harness 控制面工具和读工具可在完成前使用，写工具仅在 `EXECUTE` 放行，`Bash` 仅在 `EXECUTE`、`VERIFY`、`REVIEW` 放行。
-- Harness MCP 上下文、轻量 Note、Task 创建/切换、Observation、组合观察推进和阶段转换工具。
-- Harness MCP 递归 TaskNode 创建、分解、DFS/BFS 选择和节点状态回写工具。
-- 自动发现 TypeScript 项目的 typecheck、build 和 test 命令。
-- 确定性 Result Evaluator；没有成功评价时不能进入 `COMPLETE`。
-- 版本化 Failure Case Schema、指纹去重和全局 Case Registry。
-- 仅接收确定性测试失败的 Failure Case Curator。
-- 使用临时 Git worktree 和可选工作区补丁进行隔离复现。
-- `raw → triaged → reproducible → approved → active` 自动晋升状态机。
-- 复现记录与生命周期变更均写入不可变事件账本。
-- 成功 Trace 的 Experience 提取、去重、证据关联和三态生命周期。
-- 成功 Trace 中的递归 TaskNode 路径可沉淀进 Experience，并继续进入 Skill 策略。
-- 版本化 Skill Schema、Claude Skill Markdown 投影和最小权限声明。
-- `testing → completed → quarantined/deprecated` 生产过滤状态机。
-- development、validation、regression、holdout 四类 Case 的独立验证。
-- 每个 Case 三次隔离执行、无 Skill 失败基线和确定性 solution Oracle。
-- Validation Report 的运行次数、耗时、Token、工具调用和证据关联。
-- 任务、阶段和错误上下文召回，含 Token 预算、排序、冲突和采用反馈事件。
-- completed Skill 连续两次高严重度失败后的自动隔离。
-- Stop Hook 后台触发 Trace 演化；设置 `HARNESS_AUTO_EVOLVE=0` 可关闭。
+- 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
+- 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
+- Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
+- 规划、分支确认、Skeleton、实现和验证工作流状态；
+- Claude 生命周期 Hook 的幂等、脱敏 Trace 与 Artifact 投影；
+- Snapshot、Summary、Detail 与分页 Trace 查询；
+- 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
+- Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
+- Bash CLI、Claude 插件 Skills 和 15 个 MCP Runtime Tools。
 
 ## 环境要求
 
-- Node.js 22+
-- Claude Code 2.1.220+
-- Git
-- Bash
-- Linux、macOS 或 WSL2；原生 PowerShell 不是第一阶段目标环境
+- Bash / WSL 优先；Windows PowerShell 也可用于开发。
+- Node.js `22.13.0` 或更高版本。
+- Claude Code。模型登录和 API 配置仍由 Claude Code 自己负责，Harness 不保存模型密钥。
+
+## 安装与验证
+
+在 Bash 中进入仓库：
+
+```bash
+cd '/mnt/d/code/创业/Agent-Harness'
+npm ci
+npm run check
+```
+
+让 `harness` 命令在当前 Node 环境全局可用：
+
+```bash
+npm link
+harness doctor
+```
+
+`npm link` 只链接当前项目，不复制项目目录。若切换了 WSL 用户或 Node/NVM 版本，需要在对应环境重新执行一次。
+
+## CLI 快速体验
+
+在任意待开发项目目录中运行：
+
+```bash
+cd /path/to/your-project
+harness project inspect
+harness taskroot '实现健康检查接口'
+harness tree candidates health
+harness tree snapshot
+```
+
+`project inspect` 不会创建 marker。第一次 `taskroot` 或第一次被观察到的实质变更才会创建 `.agent-harness-project.json` 和全局 Project 记录。
+
+默认数据目录：
+
+- Linux/WSL：`$XDG_DATA_HOME/agent-harness`，未设置时为 `$HOME/.local/share/agent-harness`；
+- Windows：`%LOCALAPPDATA%/AgentHarness`；
+- 测试或自定义：设置 `AGENT_HARNESS_DATA_HOME`。
+
+节点执行由已确认的 Task Tree 驱动。Agent/插件通常通过 MCP 调用；对应的 CLI 诊断入口为：
+
+```bash
+harness node attempt-start NODE_ID TREE_REVISION_ID
+harness node verify ATTEMPT_ID
+harness node evidence ATTEMPT_ID REQUIRED_EVIDENCE_KEY TRACE_EVENT_ID
+harness node evaluate ATTEMPT_ID succeeded
+```
+
+`evaluate ... succeeded` 只是提出成功结论。Runtime 会核对当前修订、所需证据、依赖节点与子节点状态；条件不完整时会把 Evaluation 记录为 `uncertain`，不会把节点标成成功。
+
+## 在 Claude Code 中加载
+
+先构建，再从仓库目录启动：
+
+```bash
+npm run build
+claude --plugin-dir ./plugin
+```
+
+可使用 `/agent-harness:taskroot 任务名称` 显式新建根任务。普通 coding 请求会由 `task-tree-planning` Skill 引导：先判断新建还是归并、精炼完整树、运行就绪扫描、请求确认，再先做 Skeleton、后按分支深入执行。普通问答不会自动创建 Task Tree。
+
+MCP 和 Hooks 使用 `${CLAUDE_PLUGIN_ROOT}/runtime` 内的自包含构建产物，不依赖启动目录中的相对脚本。
 
 ## 开发命令
 
 ```bash
-npm install
-npm run doctor
-npm run demo
 npm run typecheck
 npm test
 npm run build
-npm run harness
-npm run dev -- agent-run
-npm run dev -- trace list
-npm run dev -- task tree <task-id|trace-id>
-npm run dev -- task node <node-id>
-npm run dev -- case list
-npm run dev -- case curate <trace-id>
-npm run dev -- case reproduce <case-id>
-npm run dev -- experience curate <trace-id>
-npm run dev -- skill generate <experience-id>
-npm run dev -- skill validate <skill-id>
-npm run dev -- skill export <skill-id>
-npm run dev -- evolve <trace-id>
+npm run plugin:validate
+npm run check
+claude plugin validate ./plugin
 ```
 
-## 默认启动方式：Harness + CCR
-
-推荐默认只记一个入口：
-
-```bash
-harness
-```
-
-该入口会：
-
-1. 启动或复用 Claude Code Router，也就是 `ccr`；
-2. 进入 Harness Agent mode；
-3. 由 Harness 调用 CCR 的 `default-claude-code` profile；
-4. 由 CCR 注入 gateway 地址、profile 身份凭据和模型路由，再启动 Claude Code；
-5. 自动加载 Harness 的五模型选择器，进入 Claude 后使用 `/model` 切换。
-
-可选配置文件：
-
-```bash
-mkdir -p ~/.config/agent-harness
-cp config/harness-router.env.example ~/.config/agent-harness/harness-router.env
-chmod 600 ~/.config/agent-harness/harness-router.env
-nano ~/.config/agent-harness/harness-router.env
-```
-
-通常不需要创建该文件。只有使用了其他 CCR Claude profile，或不希望 Harness 自动启动
-CCR 时才需要修改。上游模型供应商 API Key 继续只在 CCR UI 中管理。
-
-进入 Claude 后用 `/model` 选择以下五个模型：
-
-```text
-/model ark/glm-5.3-flash
-/model ark/glm-5.3
-/model ark/kimi-k2.7-code
-/model ark/kimi-k3
-/model deepseek/deepseek-v4-flash
-/model deepseek/deepseek-v4-pro
-```
-
-Claude Code 固定保留一个 `Default` 行；Harness 将它映射到
-`ark/glm-5.3-flash`，不会访问清单外模型。
-
-安装本机 Bash 快捷命令：
-
-```bash
-bash scripts/install-claude-shortcuts.sh
-```
-
-安装后直接输入：
-
-```bash
-harness
-```
-
-`harness` 应在你要处理的项目目录里执行。快捷脚本会回到 Agent Harness 仓库加载自身代码，
-但会保留调用时的工作目录作为 Claude Code 的项目目录。
-
-## 兼容入口：直接 provider 启动
-
-以下旧入口仍保留，方便绕过 CCR 直接指定 provider/model；但默认推荐使用 `harness` +
-CCR，再用 Claude Code `/model` 切换。
-
-火山方舟在当前配置中使用 Base URL：
-`https://ark.cn-beijing.volces.com/api/coding/v3`。DeepSeek 继续使用官方
-Anthropic 兼容入口。
-
-先在 WSL Bash 中创建只属于当前用户的密钥文件：
-
-```bash
-mkdir -p ~/.config/agent-harness
-cp config/claude-providers.env.example ~/.config/agent-harness/claude-providers.env
-chmod 600 ~/.config/agent-harness/claude-providers.env
-nano ~/.config/agent-harness/claude-providers.env
-```
-
-填入 `ARK_API_KEY` 和 `DEEPSEEK_API_KEY` 后，可以用菜单选择供应商和模型：
-
-```bash
-npm run cc
-```
-
-菜单会显示完整模型名：
-
-```text
-1) glm    Volcano Ark / glm-5.3-flash
-2) glm53  Volcano Ark / glm-5.3
-3) kimi   Volcano Ark / kimi-k2.7-code
-4) kimi3  Volcano Ark / kimi-k3
-5) ds     DeepSeek official / deepseek-v4-flash
-6) dsp    DeepSeek official / deepseek-v4-pro
-```
-
-也可以用以下短命令直接进入指定模型：
-
-```bash
-npm run glm
-npm run glm53
-npm run kimi
-npm run kimi3
-npm run ds
-npm run dsp
-```
-
-对应关系为：`glm` 使用方舟 `glm-5.3-flash`，`glm53` 使用方舟
-`glm-5.3`，`kimi` 使用方舟 `kimi-k2.7-code`，`kimi3` 使用方舟 `kimi-k3`，`ds` 使用 DeepSeek
-`deepseek-v4-flash`，`dsp` 使用 DeepSeek `deepseek-v4-pro`。
-
-`cc`、`glm`、`glm53`、`kimi`、`kimi3`、`ds` 和 `dsp` 也是 Harness-first 兼容入口：先进入
-Agent Harness mode，再由 Harness 启动 Claude Code 并挂载 Hook、MCP 和 Harness
-Agent prompt。区别是它们在启动前已经固定了 provider/model，不依赖 CCR `/model`
-路由。
-
-原来的完整命令仍然保留：
-
-```bash
-npm run claude:ark:glm
-npm run claude:ark:glm53
-npm run claude:ark:kimi
-npm run claude:ark:kimi3
-npm run claude:deepseek:flash
-npm run claude:deepseek:pro
-```
-
-方舟模型分别为 `glm-5.3-flash`、`glm-5.3`、`kimi-k2.7-code`、`kimi-k3`；DeepSeek 使用官方
-Anthropic 兼容地址与当前模型 `deepseek-v4-flash`、`deepseek-v4-pro`。命令行环境变量优先于密钥文件。
-
-独立 Skill 验证可使用相同供应商，但必须提供单独的隔离验证密钥：
-
-```bash
-export HARNESS_VALIDATION_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3
-export HARNESS_VALIDATION_AUTH_TOKEN="$ARK_API_KEY"
-export HARNESS_VALIDATION_MODEL=glm-5.3-flash
-```
-
-## 主要文档
-
-- [需求基线](./REQUIREMENTS.md)
-- [架构基线](./docs/architecture.md)
-- [Claude Code 集成覆盖矩阵](./docs/claude-code-coverage.md)
-- [配置示例](./harness.example.yaml)
-
-## 当前里程碑
-
-当前纵向 MVP 已完成。下一阶段应扩充真实、去相似的 holdout 数据集，接入后台队列，并开展多项目配对 Benchmark。
-
-## 当前限制
-
-- Claude Code CLI 执行真实模型任务前必须具备一种有效凭据：Anthropic 登录，或所选兼容供应商的 API Key。使用本项目的供应商启动命令时不需要再执行 `/login`。
-- 独立 Skill 验证刻意不读取用户 Claude 登录或系统钥匙串；真实验证需单独设置仅用于隔离验证的 `HARNESS_VALIDATION_AUTH_TOKEN`。第三方供应商还需设置 `HARNESS_VALIDATION_BASE_URL` 和 `HARNESS_VALIDATION_MODEL`；旧的 `HARNESS_VALIDATION_API_KEY` 仍向后兼容。未设置时 Skill 保持 `testing`。
-- 进入 `harness` 后，模型以 Harness Agent 身份工作；Harness MCP 是它的 durable memory 和控制面，而不是外部审批系统。
-- 常规阶段推进可使用组合工具先记录观察再转换，避免为了复制证据 ID 而机械查询 Harness 状态。
-- Task 的语义分类由 Harness Agent 通过 MCP 记录，确定性投影、作用域检查和关键门禁由 Harness Core 完成。
-- TaskNode 树已可通过 MCP 记录和查询；当前版本提供 DFS/BFS 下一节点建议，并通过 lifecycle-aware Hook safety belt 限制错误阶段的写入或 Bash。
-- 第一阶段验证环境以 Bash 为基准；原生 PowerShell 仅用于本项目开发，不属于正式运行目标。
-- Git worktree 隔离文件状态，但不是完整 OS/网络沙箱；验证器因此只开放读取、编辑和受限的 npm/git Bash 命令。高风险 Skill 会直接验证失败。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Evolution、失败案例自动晋升、Task Node Replacement/Drift、项目克隆、Codex Binding 和图形界面。

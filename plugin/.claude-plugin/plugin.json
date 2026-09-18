@@ -1,8 +1,8 @@
 {
   "name": "agent-harness",
   "version": "0.1.0",
-  "description": "Capture Claude Code lifecycle evidence for Agent Harness.",
+  "description": "Task Tree workflow, runtime state, Trace facts, and Artifact memory for coding agents",
   "author": {
-    "name": "helf-winter"
+    "name": "Agent Harness"
   }
 }

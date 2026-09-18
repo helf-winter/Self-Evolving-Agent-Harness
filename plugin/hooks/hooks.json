@@ -1,96 +1,14 @@
 {
-  "description": "Agent Harness lifecycle observation hooks",
+  "description": "Persist relevant Claude lifecycle facts in the Harness Runtime Layer",
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "PostToolUseFailure": [
-      {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "StopFailure": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/../dist/integration/hook-entry.js\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "UserPromptExpansion": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "StopFailure": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }]
   }
 }

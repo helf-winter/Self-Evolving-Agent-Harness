@@ -1,8 +1,11 @@
 {
   "mcpServers": {
-    "harness": {
+    "agent-harness": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/../dist/integration/mcp-server.js"]
+      "args": [
+        "--disable-warning=ExperimentalWarning",
+        "${CLAUDE_PLUGIN_ROOT}/runtime/mcp.mjs"
+      ]
     }
   }
 }

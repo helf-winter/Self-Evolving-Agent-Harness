@@ -1,51 +1,32 @@
 {
-  "name": "agent-harness",
+  "name": "self-evolving-agent-harness",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "A lifecycle, evidence, case, and skill-evolution harness for Claude Code.",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "bin": {
-    "harness": "./dist/cli.js"
+    "harness": "plugin/runtime/cli.mjs"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "dev": "tsx src/cli.ts",
-    "doctor": "tsx src/cli.ts doctor",
-    "harness": "bash scripts/harness.sh",
-    "cc": "bash scripts/claude-provider-menu.sh",
-    "glm": "bash scripts/claude-provider.sh ark-glm",
-    "glm53": "bash scripts/claude-provider.sh ark-glm53",
-    "kimi": "bash scripts/claude-provider.sh ark-kimi",
-    "kimi3": "bash scripts/claude-provider.sh ark-kimi3",
-    "ds": "bash scripts/claude-provider.sh deepseek-flash",
-    "dsp": "bash scripts/claude-provider.sh deepseek-pro",
-    "claude:ark:glm": "bash scripts/claude-provider.sh ark-glm",
-    "claude:ark:glm53": "bash scripts/claude-provider.sh ark-glm53",
-    "claude:ark:kimi": "bash scripts/claude-provider.sh ark-kimi",
-    "claude:ark:kimi3": "bash scripts/claude-provider.sh ark-kimi3",
-    "claude:deepseek:flash": "bash scripts/claude-provider.sh deepseek-flash",
-    "claude:deepseek:pro": "bash scripts/claude-provider.sh deepseek-pro",
-    "demo": "vitest run tests/failure-case.test.ts tests/skill-lifecycle.test.ts --reporter=verbose",
+    "build": "tsx scripts/build.ts",
+    "pretest": "npm run build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json"
+    "plugin:validate": "npm run build && vitest run tests/plugin",
+    "check": "npm run typecheck && npm test && npm run plugin:validate"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
-    "ajv": "8.20.0",
-    "ajv-formats": "3.0.1",
-    "better-sqlite3": "13.0.3",
-    "yaml": "2.9.0",
-    "zod": "4.5.4"
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "9.6.0",
-    "@types/node": "24.10.1",
-    "tsx": "4.20.6",
+    "@types/node": "22.20.3",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.13",
     "typescript": "7.0.2",
-    "vitest": "5.0.0"
+    "vitest": "5.0.1"
   }
 }
