@@ -217,4 +217,96 @@ export const migrations: Migration[] = [{
     JOIN task_nodes n ON n.tree_id = t.id
     WHERE t.current_revision_id IS NOT NULL;
   `,
+}, {
+  version: 4,
+  sql: `
+    ALTER TABLE artifacts ADD COLUMN granularity TEXT NOT NULL DEFAULT 'structural'
+      CHECK(granularity IN ('structural', 'contract', 'symbol'));
+    ALTER TABLE artifacts ADD COLUMN artifact_type TEXT NOT NULL DEFAULT 'file';
+    ALTER TABLE artifacts ADD COLUMN path_or_name TEXT;
+    ALTER TABLE artifacts ADD COLUMN parent_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL;
+    ALTER TABLE artifacts ADD COLUMN identity_strategy TEXT NOT NULL DEFAULT 'path';
+    ALTER TABLE artifacts ADD COLUMN confidence TEXT NOT NULL DEFAULT 'observed'
+      CHECK(confidence IN ('planned', 'observed', 'verified'));
+    ALTER TABLE artifacts ADD COLUMN planned_by_task_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL;
+    ALTER TABLE artifacts ADD COLUMN plan_baseline_at TEXT;
+    ALTER TABLE artifacts ADD COLUMN current_hash_or_version TEXT;
+    ALTER TABLE artifacts ADD COLUMN source_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE SET NULL;
+    ALTER TABLE artifacts ADD COLUMN source_planning_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL;
+
+    UPDATE artifacts SET
+      granularity = CASE kind WHEN 'contract' THEN 'contract' WHEN 'symbol' THEN 'symbol' ELSE 'structural' END,
+      artifact_type = kind,
+      path_or_name = locator,
+      identity_strategy = CASE kind WHEN 'contract' THEN 'logical_contract_id' WHEN 'symbol' THEN 'qualified_symbol' WHEN 'command' THEN 'command_signature' ELSE 'path' END,
+      confidence = CASE WHEN status IN ('draft', 'planned') THEN 'planned' WHEN status = 'verified' THEN 'verified' ELSE 'observed' END;
+
+    CREATE TABLE task_node_artifact_links (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      task_node_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE CASCADE,
+      artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      relation_type TEXT NOT NULL CHECK(relation_type IN ('plans', 'implements', 'consumes', 'creates', 'modifies', 'reads', 'deletes', 'verifies')),
+      source_planning_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      UNIQUE(tree_revision_id, task_node_id, artifact_id, relation_type)
+    );
+    CREATE INDEX task_artifact_node_idx ON task_node_artifact_links(task_node_id, tree_revision_id, relation_type);
+    CREATE INDEX task_artifact_artifact_idx ON task_node_artifact_links(artifact_id, tree_revision_id, relation_type);
+
+    CREATE TABLE artifact_graph_relations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      from_artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      to_artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      source_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE SET NULL,
+      source_planning_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(tree_revision_id, from_artifact_id, to_artifact_id, kind)
+    );
+
+    CREATE TABLE artifact_contracts (
+      id TEXT PRIMARY KEY,
+      contract_id TEXT NOT NULL,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      contract_name TEXT NOT NULL,
+      contract_version TEXT NOT NULL,
+      compatibility_policy TEXT NOT NULL CHECK(compatibility_policy IN ('exact', 'backward_compatible', 'custom_validation')),
+      schema_or_signature TEXT NOT NULL,
+      provider_revision_ids_json TEXT NOT NULL,
+      consumer_revision_ids_json TEXT NOT NULL,
+      validation_refs_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(contract_id, tree_revision_id)
+    );
+    CREATE INDEX artifact_contract_carrier_idx ON artifact_contracts(artifact_id, tree_revision_id);
+
+    CREATE TABLE plan_drift_records (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL,
+      planned_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+      actual_artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+      drift_type TEXT NOT NULL CHECK(drift_type IN ('missing_planned_artifact', 'unexpected_artifact', 'artifact_replaced', 'responsibility_changed', 'relation_changed')),
+      severity TEXT NOT NULL CHECK(severity IN ('info', 'warning', 'blocking')),
+      trace_event_id TEXT NOT NULL UNIQUE REFERENCES trace_events(id) ON DELETE RESTRICT,
+      drift_explanation TEXT NOT NULL,
+      agent_recommendation TEXT,
+      resolution_status TEXT NOT NULL CHECK(resolution_status IN ('pending_user_confirmation', 'accepted', 'rejected', 'branch_cancelled', 'recorded')),
+      user_decision TEXT,
+      description TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX plan_drift_scope_idx ON plan_drift_records(project_id, tree_id, task_node_id, severity, resolution_status);
+  `,
 }];

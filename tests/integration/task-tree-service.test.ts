@@ -157,4 +157,46 @@ describe("TaskTreeService", () => {
     ]);
     database.close();
   });
+
+  it("projects Artifact links, relations, and contracts from an immutable planning revision", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const document = {
+      ...branchedDocument,
+      artifacts: [
+        { id: "api", kind: "contract" as const, locator: "contract:api", metadata: { owner: "runtime" } },
+        { id: "file", kind: "file" as const, locator: "src/api.ts" },
+      ],
+      artifactLinks: [
+        { taskNodeId: "branch-a", artifactId: "api", relationType: "implements" as const },
+        { taskNodeId: "branch-b", artifactId: "api", relationType: "consumes" as const },
+        { taskNodeId: "branch-a", artifactId: "file", relationType: "creates" as const },
+      ],
+      artifactRelations: [{ fromArtifactId: "file", toArtifactId: "api", kind: "calls" as const }],
+      artifactContracts: [{
+        id: "api-v1", artifactId: "api", name: "Runtime API", version: "1", compatibilityPolicy: "exact" as const,
+        schemaOrSignature: "GET /runtime", providerNodeIds: ["branch-a"], consumerNodeIds: ["branch-b"], validationRefs: ["contract-test"],
+      }],
+    };
+    const revision = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document });
+    database.close();
+
+    const reopened = new RuntimeDatabase(database.filename);
+    expect(reopened.all<{ relation_type: string; artifact_id: string }>(
+      "SELECT relation_type, artifact_id FROM task_node_artifact_links WHERE tree_revision_id = ? ORDER BY relation_type", revision.revisionId,
+    )).toEqual([
+      { relation_type: "consumes", artifact_id: "api" },
+      { relation_type: "creates", artifact_id: "file" },
+      { relation_type: "implements", artifact_id: "api" },
+    ]);
+    expect(reopened.get<{ source_planning_revision_id: string; granularity: string; metadata_json: string }>(
+      "SELECT source_planning_revision_id, granularity, metadata_json FROM artifacts WHERE id = 'api'",
+    )).toEqual({ source_planning_revision_id: revision.revisionId, granularity: "contract", metadata_json: '{"owner":"runtime"}' });
+    expect(reopened.get<{ contract_name: string; provider_revision_ids_json: string; consumer_revision_ids_json: string }>(
+      "SELECT contract_name, provider_revision_ids_json, consumer_revision_ids_json FROM artifact_contracts WHERE contract_id = 'api-v1' AND tree_revision_id = ?",
+      revision.revisionId,
+    )).toEqual(expect.objectContaining({ contract_name: "Runtime API" }));
+    expect(reopened.get<{ kind: string }>("SELECT kind FROM artifact_graph_relations WHERE tree_revision_id = ?", revision.revisionId)).toEqual({ kind: "calls" });
+    reopened.close();
+  });
 });

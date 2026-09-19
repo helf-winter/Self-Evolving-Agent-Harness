@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(3);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(4);
     reopened.close();
   });
 
@@ -87,6 +87,22 @@ describe("RuntimeDatabase", () => {
     expect(() => database.run(
       "INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES ('p1', 't1', 'tr1', 'n2', 'invalid', 'now')",
     )).toThrow();
+    database.close();
+  });
+
+  it("adds Artifact Graph planning projections with legacy Artifact defaults", async () => {
+    const database = new RuntimeDatabase(await databasePath());
+    const tables = database.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('task_node_artifact_links', 'artifact_graph_relations', 'artifact_contracts', 'plan_drift_records') ORDER BY name",
+    );
+    expect(tables).toEqual([
+      { name: "artifact_contracts" }, { name: "artifact_graph_relations" }, { name: "plan_drift_records" }, { name: "task_node_artifact_links" },
+    ]);
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO artifacts (id, project_id, kind, locator, status, metadata_json, created_at, updated_at) VALUES ('a1', 'p1', 'command', 'npm test', 'observed', '{}', 'now', 'now')");
+    expect(database.get<{ granularity: string; artifact_type: string; identity_strategy: string; confidence: string }>(
+      "SELECT granularity, artifact_type, identity_strategy, confidence FROM artifacts WHERE id = 'a1'",
+    )).toEqual({ granularity: "structural", artifact_type: "file", identity_strategy: "path", confidence: "observed" });
     database.close();
   });
 });
