@@ -1,4 +1,5 @@
 import type { ArtifactInput } from "./artifact.js";
+import { normalizeArtifactInput, type ArtifactContractInput, type ArtifactRelationInput, type TaskArtifactLinkInput } from "./artifact-graph.js";
 
 export type ExecutionPhase = "skeleton" | "implementation" | "verification";
 export type RelationKind = "depends_on" | "calls" | "data_exchange" | "shares_contract";
@@ -35,10 +36,13 @@ export interface TaskTreeDocument {
   nodes: TaskNodeInput[];
   relations: TaskRelationInput[];
   artifacts: ArtifactInput[];
+  artifactLinks?: TaskArtifactLinkInput[];
+  artifactRelations?: ArtifactRelationInput[];
+  artifactContracts?: ArtifactContractInput[];
 }
 
 export interface ValidationError {
-  code: "invalid_tree_structure" | "leaf_contract_invalid" | "relation_artifact_required";
+  code: "invalid_tree_structure" | "leaf_contract_invalid" | "relation_artifact_required" | "artifact_reference_invalid" | "artifact_contract_invalid";
   path: string;
 }
 
@@ -103,6 +107,32 @@ export function validateTaskTree(document: TaskTreeDocument): ValidationResult {
   if (document.nodes.some((node) => visit(node.id))) errors.push({ code: "invalid_tree_structure", path: "nodes" });
 
   const artifacts = new Set(document.artifacts.map((artifact) => artifact.id));
+  if (artifacts.size !== document.artifacts.length) errors.push({ code: "artifact_reference_invalid", path: "artifacts" });
+  document.artifacts.forEach((artifact, index) => {
+    if (artifact.parentArtifactId && !artifacts.has(artifact.parentArtifactId)) {
+      errors.push({ code: "artifact_reference_invalid", path: `artifacts[${index}].parentArtifactId` });
+    }
+  });
+  (document.artifactLinks ?? []).forEach((link, index) => {
+    if (!ids.has(link.taskNodeId) || !artifacts.has(link.artifactId)) {
+      errors.push({ code: "artifact_reference_invalid", path: `artifactLinks[${index}]` });
+    }
+  });
+  (document.artifactRelations ?? []).forEach((relation, index) => {
+    if (!artifacts.has(relation.fromArtifactId) || !artifacts.has(relation.toArtifactId)) {
+      errors.push({ code: "artifact_reference_invalid", path: `artifactRelations[${index}]` });
+    }
+  });
+  const contractIds = new Set<string>();
+  (document.artifactContracts ?? []).forEach((contract, index) => {
+    const carrier = document.artifacts.find((artifact) => artifact.id === contract.artifactId);
+    const invalid = contractIds.has(contract.id) || !carrier || normalizeArtifactInput(carrier).granularity !== "contract" ||
+      !contract.name.trim() || !contract.version.trim() || !contract.schemaOrSignature.trim() ||
+      !contract.providerNodeIds.length || !contract.consumerNodeIds.length || !contract.validationRefs.length ||
+      contract.providerNodeIds.some((nodeId) => !ids.has(nodeId)) || contract.consumerNodeIds.some((nodeId) => !ids.has(nodeId));
+    contractIds.add(contract.id);
+    if (invalid) errors.push({ code: "artifact_contract_invalid", path: `artifactContracts[${index}]` });
+  });
   document.relations.forEach((relation, index) => {
     if (!ids.has(relation.fromNodeId) || !ids.has(relation.toNodeId)) {
       errors.push({ code: "invalid_tree_structure", path: `relations[${index}]` });
