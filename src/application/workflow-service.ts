@@ -1,5 +1,8 @@
 import { HarnessError } from "../domain/errors.js";
+import { deriveConfirmationStates, resolveConfirmationScope, type ConfirmationState } from "../domain/confirmation.js";
 import { newId, nowIso } from "../domain/ids.js";
+import { canonicalJson } from "../domain/trace.js";
+import type { TaskTreeDocument } from "../domain/task-tree.js";
 import { canTransitionWorkflow, type WorkflowStage } from "../domain/workflow.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 
@@ -16,6 +19,10 @@ interface ConfirmationRow {
   tree_id: string;
   scope_id: string;
   status: string;
+  tree_revision_id: string;
+  readiness_result_id: string;
+  scope_kind: "tree" | "branch";
+  scope_root_node_id: string | null;
 }
 
 export class WorkflowService {
@@ -25,6 +32,8 @@ export class WorkflowService {
     projectId: string;
     treeId: string;
     scopeId: string;
+    scopeRootNodeId?: string;
+    readinessResultId?: string;
     prompt: string;
     workflowRevision: number;
   }) {
@@ -33,12 +42,43 @@ export class WorkflowService {
       throw new HarnessError("workflow_transition_rejected", "scope confirmation is only valid at branch_confirmation");
     }
     if (!input.prompt.trim()) throw new HarnessError("invalid_input", "confirmation prompt is required");
+    const tree = this.database.get<{ current_revision_id: string; document_json: string }>(`
+      SELECT t.current_revision_id, r.document_json
+      FROM task_trees t JOIN task_tree_revisions r ON r.id = t.current_revision_id
+      WHERE t.id = ? AND t.project_id = ?
+    `, input.treeId, input.projectId);
+    if (!tree) throw new HarnessError("not_found", "current Task Tree revision was not found");
+    const document = JSON.parse(tree.document_json) as TaskTreeDocument;
+    const coveredNodeIds = resolveConfirmationScope(document, input.scopeRootNodeId);
+    if (!coveredNodeIds) throw new HarnessError("not_found", "confirmation scope root was not found in the current Task Tree revision");
+    const scopeKind = input.scopeRootNodeId ? "branch" as const : "tree" as const;
+    const scopeRootNodeId = input.scopeRootNodeId ?? null;
+    const readiness = input.readinessResultId
+      ? this.database.get<{ id: string }>(`
+          SELECT id FROM plan_readiness_results
+          WHERE id = ? AND tree_id = ? AND revision_id = ? AND ready = 1 AND scope_kind = ?
+            AND ((scope_root_node_id IS NULL AND ? IS NULL) OR scope_root_node_id = ?)
+        `, input.readinessResultId, input.treeId, tree.current_revision_id, scopeKind, scopeRootNodeId, scopeRootNodeId)
+      : this.database.get<{ id: string }>(`
+          SELECT id FROM plan_readiness_results
+          WHERE tree_id = ? AND revision_id = ? AND ready = 1 AND scope_kind = ?
+            AND ((scope_root_node_id IS NULL AND ? IS NULL) OR scope_root_node_id = ?)
+          ORDER BY created_at DESC LIMIT 1
+        `, input.treeId, tree.current_revision_id, scopeKind, scopeRootNodeId, scopeRootNodeId);
+    if (!readiness) throw new HarnessError("workflow_transition_rejected", "a current ready Plan Readiness result is required for this exact scope");
     const confirmationId = newId();
     this.database.run(
-      "INSERT INTO runtime_confirmation_prompts (id, project_id, tree_id, scope_id, prompt, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+      `INSERT INTO runtime_confirmation_prompts (
+        id, project_id, tree_id, scope_id, prompt, status, created_at,
+        tree_revision_id, readiness_result_id, scope_kind, scope_root_node_id
+      ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       confirmationId, input.projectId, input.treeId, input.scopeId, input.prompt.trim(), nowIso(),
+      tree.current_revision_id, readiness.id, scopeKind, scopeRootNodeId,
     );
-    return { confirmationId, status: "pending" as const, scopeId: input.scopeId, prompt: input.prompt.trim() };
+    return {
+      confirmationId, status: "pending" as const, scopeId: input.scopeId, prompt: input.prompt.trim(),
+      revisionId: tree.current_revision_id, readinessResultId: readiness.id, scopeKind, scopeRootNodeId, coveredNodeIds,
+    };
   }
 
   confirmScope(input: {
@@ -49,11 +89,22 @@ export class WorkflowService {
     workflowRevision: number;
   }) {
     const confirmation = this.database.get<ConfirmationRow>(
-      "SELECT id, project_id, tree_id, scope_id, status FROM runtime_confirmation_prompts WHERE id = ? AND project_id = ?",
+      `SELECT id, project_id, tree_id, scope_id, status, tree_revision_id, readiness_result_id,
+              scope_kind, scope_root_node_id
+       FROM runtime_confirmation_prompts WHERE id = ? AND project_id = ?`,
       input.confirmationId, input.projectId,
     );
     if (!confirmation || confirmation.status !== "pending") throw new HarnessError("not_found", "pending confirmation was not found");
     const workflow = this.requireWorkflow(input.projectId, confirmation.tree_id, input.workflowRevision);
+    const tree = this.database.get<{ current_revision_id: string; document_json: string }>(`
+      SELECT t.current_revision_id, r.document_json
+      FROM task_trees t JOIN task_tree_revisions r ON r.id = t.current_revision_id
+      WHERE t.id = ? AND t.project_id = ?
+    `, confirmation.tree_id, input.projectId);
+    if (!tree) throw new HarnessError("not_found", "current Task Tree revision was not found");
+    if (tree.current_revision_id !== confirmation.tree_revision_id) {
+      throw new HarnessError("revision_conflict", "confirmation prompt belongs to an older Task Tree revision");
+    }
     const evidence = this.database.get<{ id: string }>(
       "SELECT id FROM trace_events WHERE id = ? AND project_id = ? AND event_name = 'UserPromptSubmit'",
       input.answerTraceEventId, input.projectId,
@@ -65,31 +116,91 @@ export class WorkflowService {
         "UPDATE runtime_confirmation_prompts SET status = 'rejected', answer = ?, answer_trace_event_id = ?, resolved_at = ? WHERE id = ?",
         input.answer, input.answerTraceEventId, nowIso(), confirmation.id,
       );
-      return { stage: workflow.stage, workflowRevision: workflow.revision, status: "rejected" as const };
+      return {
+        stage: workflow.stage, workflowRevision: workflow.revision, status: "rejected" as const,
+        scopeKind: confirmation.scope_kind, scopeRootNodeId: confirmation.scope_root_node_id,
+      };
     }
 
-    const transition = canTransitionWorkflow(workflow.stage, "skeleton_pass", { confirmationId: confirmation.id });
-    if (!transition.ok) throw new HarnessError(transition.code, transition.reason);
+    const document = JSON.parse(tree.document_json) as TaskTreeDocument;
+    const coveredNodeIds = resolveConfirmationScope(document, confirmation.scope_root_node_id ?? undefined);
+    if (!coveredNodeIds) throw new HarnessError("revision_conflict", "confirmation scope no longer exists in the current revision");
+    const covered = new Set(coveredNodeIds);
+    const confirmationRecordId = newId();
     const timestamp = nowIso();
+    let allConfirmed = false;
     this.database.transaction(() => {
       this.database.run(
         "UPDATE runtime_confirmation_prompts SET status = 'confirmed', answer = ?, answer_trace_event_id = ?, resolved_at = ? WHERE id = ?",
         input.answer, input.answerTraceEventId, timestamp, confirmation.id,
       );
-      this.database.run("UPDATE artifacts SET status = 'planned', updated_at = ? WHERE tree_id = ? AND status = 'draft'", timestamp, confirmation.tree_id);
-      this.database.run("UPDATE workflow_states SET stage = 'skeleton_pass', revision = revision + 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
-      this.database.run("UPDATE task_trees SET status = 'confirmed', updated_at = ? WHERE id = ?", timestamp, confirmation.tree_id);
       this.database.run(`
-        UPDATE task_nodes SET status = 'ready'
-        WHERE tree_id = ? AND status IN ('draft', 'pending_user_confirmation')
-          AND EXISTS (
-            SELECT 1 FROM task_trees t
-            JOIN task_node_revisions nr ON nr.node_id = task_nodes.id AND nr.tree_revision_id = t.current_revision_id
-            WHERE t.id = task_nodes.tree_id
-          )
-      `, confirmation.tree_id);
+        INSERT INTO scope_confirmation_records (
+          id, project_id, tree_id, tree_revision_id, scope_kind, scope_root_node_id,
+          covered_node_ids_json, confirmation_prompt_id, answer_trace_event_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, confirmationRecordId, input.projectId, confirmation.tree_id, confirmation.tree_revision_id,
+      confirmation.scope_kind, confirmation.scope_root_node_id, canonicalJson(coveredNodeIds), confirmation.id,
+      input.answerTraceEventId, timestamp);
+
+      const records = this.database.all<{ id: string; covered_node_ids_json: string }>(`
+        SELECT id, covered_node_ids_json FROM scope_confirmation_records
+        WHERE tree_id = ? AND tree_revision_id = ? ORDER BY created_at, id
+      `, confirmation.tree_id, confirmation.tree_revision_id);
+      const confirmedNodeIds = new Set<string>();
+      const sourceByNode = new Map<string, string>();
+      for (const record of records) {
+        for (const nodeId of JSON.parse(record.covered_node_ids_json) as string[]) {
+          confirmedNodeIds.add(nodeId);
+          sourceByNode.set(nodeId, record.id);
+        }
+      }
+      const pendingNodeIds = new Set(this.database.all<{ task_node_id: string }>(`
+        SELECT task_node_id FROM task_node_confirmation_states
+        WHERE tree_revision_id = ? AND state = 'pending_user_confirmation'
+      `, confirmation.tree_revision_id).map((row) => row.task_node_id).filter((nodeId) => !confirmedNodeIds.has(nodeId)));
+      const states = deriveConfirmationStates(document, confirmedNodeIds, pendingNodeIds);
+      for (const node of document.nodes) {
+        const state = states[node.id] ?? "draft";
+        this.database.run(`
+          INSERT INTO task_node_confirmation_states (
+            project_id, tree_id, tree_revision_id, task_node_id, state, source_confirmation_id, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(tree_revision_id, task_node_id) DO UPDATE SET
+            state = excluded.state, source_confirmation_id = excluded.source_confirmation_id, updated_at = excluded.updated_at
+        `, input.projectId, confirmation.tree_id, confirmation.tree_revision_id, node.id, state,
+        sourceByNode.get(node.id) ?? null, timestamp);
+
+        const currentStatus = this.database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = ?", node.id)?.status;
+        if (state === "confirmed") {
+          const dependenciesConfirmed = (node.dependencies ?? []).every((dependencyId) => states[dependencyId] === "confirmed");
+          if (["draft", "pending_user_confirmation", "blocked_by_unconfirmed_dependency"].includes(currentStatus ?? "")) {
+            this.database.run("UPDATE task_nodes SET status = ? WHERE id = ?", dependenciesConfirmed ? "ready" : "blocked_by_unconfirmed_dependency", node.id);
+          }
+        } else if (["ready", "blocked_by_unconfirmed_dependency"].includes(currentStatus ?? "")) {
+          this.database.run("UPDATE task_nodes SET status = 'pending_user_confirmation' WHERE id = ?", node.id);
+        }
+      }
+
+      allConfirmed = document.nodes.every((node) => states[node.id] === "confirmed");
+      if (allConfirmed) {
+        const transition = canTransitionWorkflow(workflow.stage, "skeleton_pass", { confirmationId: confirmation.id });
+        if (!transition.ok) throw new HarnessError(transition.code, transition.reason);
+        this.database.run("UPDATE artifacts SET status = 'planned', updated_at = ? WHERE tree_id = ? AND status = 'draft'", timestamp, confirmation.tree_id);
+        this.database.run("UPDATE workflow_states SET stage = 'skeleton_pass', revision = revision + 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
+        this.database.run("UPDATE task_trees SET status = 'confirmed', updated_at = ? WHERE id = ?", timestamp, confirmation.tree_id);
+      } else {
+        this.database.run("UPDATE task_trees SET status = 'partially_confirmed', updated_at = ? WHERE id = ?", timestamp, confirmation.tree_id);
+      }
     });
-    return { stage: "skeleton_pass" as const, workflowRevision: workflow.revision + 1, status: "confirmed" as const };
+    return {
+      stage: allConfirmed ? "skeleton_pass" as const : workflow.stage,
+      workflowRevision: allConfirmed ? workflow.revision + 1 : workflow.revision,
+      status: "confirmed" as const,
+      scopeKind: confirmation.scope_kind,
+      scopeRootNodeId: confirmation.scope_root_node_id,
+      coveredNodeIds: [...covered],
+    };
   }
 
   transition(input: {

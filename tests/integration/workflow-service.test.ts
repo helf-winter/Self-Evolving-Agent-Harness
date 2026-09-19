@@ -14,6 +14,10 @@ async function fixture() {
   database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/a', 'now', 'now')");
   const tree = await new TaskTreeService(database).createTaskRoot({ projectId: "p1", title: "Runtime" });
   database.run("UPDATE workflow_states SET stage = 'branch_confirmation' WHERE project_id = 'p1'");
+  database.run(
+    "INSERT INTO plan_readiness_results (id, tree_id, revision_id, ready, blockers_json, created_at) VALUES ('ready-tree', ?, ?, 1, '[]', 'now')",
+    tree.treeId, tree.revisionId,
+  );
   database.run("INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, created_at, updated_at) VALUES ('a1', 'p1', ?, 'file', 'src/a.ts', 'draft', 'now', 'now')", tree.treeId);
   return { database, tree, service: new WorkflowService(database) };
 }
@@ -42,6 +46,73 @@ describe("WorkflowService", () => {
     expect(result).toMatchObject({ stage: "skeleton_pass", workflowRevision: 2 });
     expect(database.get<{ status: string }>("SELECT status FROM artifacts WHERE id = 'a1'")?.status).toBe("planned");
     expect(database.get<{ status: string }>("SELECT status FROM runtime_confirmation_prompts WHERE id = ?", prompt.confirmationId)?.status).toBe("confirmed");
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM scope_confirmation_records WHERE confirmation_prompt_id = ?", prompt.confirmationId)?.count).toBe(1);
+    database.close();
+  });
+
+  it("confirms one branch while keeping siblings isolated and blocking unconfirmed dependencies", async () => {
+    const { database, tree, service } = await fixture();
+    const taskTrees = new TaskTreeService(database);
+    database.run("UPDATE workflow_states SET stage = 'task_tree_refinement' WHERE project_id = 'p1'");
+    const document = {
+      nodes: [
+        { id: "root", parentId: null, title: "Root", children: ["branch-a", "branch-b"] },
+        {
+          id: "branch-a", parentId: "root", title: "A", children: [], objectives: ["A"], expectedOutputs: ["a.ts"],
+          acceptanceCriteria: ["A passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: ["branch-b"],
+          requiredEvidence: [{ key: "a-test", description: "A tests" }], executionPhase: "implementation" as const,
+          stopDecompositionReason: "one branch",
+        },
+        {
+          id: "branch-b", parentId: "root", title: "B", children: [], objectives: ["B"], expectedOutputs: ["b.ts"],
+          acceptanceCriteria: ["B passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: [],
+          requiredEvidence: [{ key: "b-test", description: "B tests" }], executionPhase: "implementation" as const,
+          stopDecompositionReason: "one branch",
+        },
+      ],
+      relations: [], artifacts: [],
+    };
+    const revision = taskTrees.saveDraftRevision({ projectId: "p1", treeId: tree.treeId, baseRevisionId: tree.revisionId, document });
+    const readiness = taskTrees.scanPlanReadiness({ projectId: "p1", treeId: tree.treeId, scopeRootNodeId: "branch-a" });
+    const workflow = database.get<{ revision: number }>("SELECT revision FROM workflow_states WHERE project_id = 'p1' AND active = 1")!;
+    const prompt = service.createConfirmationPrompt({
+      projectId: "p1", treeId: tree.treeId, scopeId: "branch-a", scopeRootNodeId: "branch-a",
+      readinessResultId: readiness.resultId, prompt: "Confirm A?", workflowRevision: workflow.revision,
+    });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('branch-answer', 'p1', ?, 's1', 'UserPromptSubmit', '{\"text\":\"yes\"}', 'now', 'branch-answer')", tree.treeId);
+    const result = service.confirmScope({ projectId: "p1", confirmationId: prompt.confirmationId, answer: "yes", answerTraceEventId: "branch-answer", workflowRevision: workflow.revision });
+
+    expect(result).toMatchObject({ stage: "branch_confirmation", status: "confirmed", scopeKind: "branch" });
+    expect(database.all<{ task_node_id: string; state: string }>(
+      "SELECT task_node_id, state FROM task_node_confirmation_states WHERE tree_revision_id = ? ORDER BY task_node_id", revision.revisionId,
+    )).toEqual([
+      { task_node_id: "branch-a", state: "confirmed" },
+      { task_node_id: "branch-b", state: "draft" },
+      { task_node_id: "root", state: "partial_confirmed" },
+    ]);
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'branch-a'")).toEqual({ status: "blocked_by_unconfirmed_dependency" });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'branch-b'")).toEqual({ status: "draft" });
+    database.close();
+  });
+
+  it("rejects stale prompts after a Task Tree revision changes", async () => {
+    const { database, tree, service } = await fixture();
+    const prompt = service.createConfirmationPrompt({ projectId: "p1", treeId: tree.treeId, scopeId: tree.treeId, prompt: "Execute?", workflowRevision: 1 });
+    database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('new-revision', ?, 2, ?, 'later')", tree.treeId, JSON.stringify(tree.document));
+    database.run("UPDATE task_trees SET current_revision_id = 'new-revision' WHERE id = ?", tree.treeId);
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('stale-answer', 'p1', ?, 's1', 'UserPromptSubmit', '{\"text\":\"yes\"}', 'later', 'stale-answer')", tree.treeId);
+    expect(() => service.confirmScope({ projectId: "p1", confirmationId: prompt.confirmationId, answer: "yes", answerTraceEventId: "stale-answer", workflowRevision: 1 }))
+      .toThrow(expect.objectContaining({ code: "revision_conflict" }));
+    database.close();
+  });
+
+  it("records rejection without creating an accepted confirmation record", async () => {
+    const { database, tree, service } = await fixture();
+    const prompt = service.createConfirmationPrompt({ projectId: "p1", treeId: tree.treeId, scopeId: tree.treeId, prompt: "Execute?", workflowRevision: 1 });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('reject-answer', 'p1', ?, 's1', 'UserPromptSubmit', '{\"text\":\"no\"}', 'now', 'reject-answer')", tree.treeId);
+    expect(service.confirmScope({ projectId: "p1", confirmationId: prompt.confirmationId, answer: "no", answerTraceEventId: "reject-answer", workflowRevision: 1 }))
+      .toMatchObject({ stage: "branch_confirmation", status: "rejected" });
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM scope_confirmation_records")?.count).toBe(0);
     database.close();
   });
 
