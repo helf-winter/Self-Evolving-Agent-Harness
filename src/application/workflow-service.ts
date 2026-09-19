@@ -23,6 +23,7 @@ interface ConfirmationRow {
   readiness_result_id: string;
   scope_kind: "tree" | "branch";
   scope_root_node_id: string | null;
+  created_at: string;
 }
 
 export class WorkflowService {
@@ -90,7 +91,7 @@ export class WorkflowService {
   }) {
     const confirmation = this.database.get<ConfirmationRow>(
       `SELECT id, project_id, tree_id, scope_id, status, tree_revision_id, readiness_result_id,
-              scope_kind, scope_root_node_id
+              scope_kind, scope_root_node_id, created_at
        FROM runtime_confirmation_prompts WHERE id = ? AND project_id = ?`,
       input.confirmationId, input.projectId,
     );
@@ -106,8 +107,9 @@ export class WorkflowService {
       throw new HarnessError("revision_conflict", "confirmation prompt belongs to an older Task Tree revision");
     }
     const evidence = this.database.get<{ id: string }>(
-      "SELECT id FROM trace_events WHERE id = ? AND project_id = ? AND event_name = 'UserPromptSubmit'",
-      input.answerTraceEventId, input.projectId,
+      `SELECT id FROM trace_events
+       WHERE id = ? AND project_id = ? AND tree_id = ? AND event_name = 'UserPromptSubmit' AND occurred_at >= ?`,
+      input.answerTraceEventId, input.projectId, confirmation.tree_id, confirmation.created_at,
     );
     if (!evidence) throw new HarnessError("workflow_transition_rejected", "a recorded user answer Trace Event is required");
 
@@ -147,8 +149,13 @@ export class WorkflowService {
         SELECT id, covered_node_ids_json FROM scope_confirmation_records
         WHERE tree_id = ? AND tree_revision_id = ? ORDER BY created_at, id
       `, confirmation.tree_id, confirmation.tree_revision_id);
-      const confirmedNodeIds = new Set<string>();
-      const sourceByNode = new Map<string, string>();
+      const inheritedConfirmed = this.database.all<{ task_node_id: string; source_confirmation_id: string | null }>(`
+        SELECT task_node_id, source_confirmation_id FROM task_node_confirmation_states
+        WHERE tree_revision_id = ? AND state = 'confirmed'
+      `, confirmation.tree_revision_id);
+      const confirmedNodeIds = new Set(inheritedConfirmed.map((row) => row.task_node_id));
+      const sourceByNode = new Map(inheritedConfirmed.flatMap((row) =>
+        row.source_confirmation_id ? [[row.task_node_id, row.source_confirmation_id] as const] : []));
       for (const record of records) {
         for (const nodeId of JSON.parse(record.covered_node_ids_json) as string[]) {
           confirmedNodeIds.add(nodeId);

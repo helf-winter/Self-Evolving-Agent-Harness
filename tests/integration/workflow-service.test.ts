@@ -7,6 +7,24 @@ import { WorkflowService } from "../../src/application/workflow-service.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
 
 const dirs: string[] = [];
+const branchDocument = {
+  nodes: [
+    { id: "root", parentId: null, title: "Root", children: ["branch-a", "branch-b"] },
+    {
+      id: "branch-a", parentId: "root", title: "A", children: [], objectives: ["A"], expectedOutputs: ["a.ts"],
+      acceptanceCriteria: ["A passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: ["branch-b"],
+      requiredEvidence: [{ key: "a-test", description: "A tests" }], executionPhase: "implementation" as const,
+      stopDecompositionReason: "one branch",
+    },
+    {
+      id: "branch-b", parentId: "root", title: "B", children: [], objectives: ["B"], expectedOutputs: ["b.ts"],
+      acceptanceCriteria: ["B passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: [],
+      requiredEvidence: [{ key: "b-test", description: "B tests" }], executionPhase: "implementation" as const,
+      stopDecompositionReason: "one branch",
+    },
+  ],
+  relations: [], artifacts: [],
+};
 async function fixture() {
   const directory = await mkdtemp(path.join(tmpdir(), "harness-workflow-"));
   dirs.push(directory);
@@ -50,28 +68,20 @@ describe("WorkflowService", () => {
     database.close();
   });
 
+  it("rejects user-answer evidence outside the prompt tree scope", async () => {
+    const { database, tree, service } = await fixture();
+    const prompt = service.createConfirmationPrompt({ projectId: "p1", treeId: tree.treeId, scopeId: tree.treeId, prompt: "Execute?", workflowRevision: 1 });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('unscoped-answer', 'p1', NULL, 's1', 'UserPromptSubmit', '{\"text\":\"yes\"}', 'now', 'unscoped-answer')");
+    expect(() => service.confirmScope({ projectId: "p1", confirmationId: prompt.confirmationId, answer: "yes", answerTraceEventId: "unscoped-answer", workflowRevision: 1 }))
+      .toThrow(expect.objectContaining({ code: "workflow_transition_rejected" }));
+    database.close();
+  });
+
   it("confirms one branch while keeping siblings isolated and blocking unconfirmed dependencies", async () => {
     const { database, tree, service } = await fixture();
     const taskTrees = new TaskTreeService(database);
     database.run("UPDATE workflow_states SET stage = 'task_tree_refinement' WHERE project_id = 'p1'");
-    const document = {
-      nodes: [
-        { id: "root", parentId: null, title: "Root", children: ["branch-a", "branch-b"] },
-        {
-          id: "branch-a", parentId: "root", title: "A", children: [], objectives: ["A"], expectedOutputs: ["a.ts"],
-          acceptanceCriteria: ["A passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: ["branch-b"],
-          requiredEvidence: [{ key: "a-test", description: "A tests" }], executionPhase: "implementation" as const,
-          stopDecompositionReason: "one branch",
-        },
-        {
-          id: "branch-b", parentId: "root", title: "B", children: [], objectives: ["B"], expectedOutputs: ["b.ts"],
-          acceptanceCriteria: ["B passes"], unresolvedQuestions: [], unresolvedDecisions: [], dependencies: [],
-          requiredEvidence: [{ key: "b-test", description: "B tests" }], executionPhase: "implementation" as const,
-          stopDecompositionReason: "one branch",
-        },
-      ],
-      relations: [], artifacts: [],
-    };
+    const document = branchDocument;
     const revision = taskTrees.saveDraftRevision({ projectId: "p1", treeId: tree.treeId, baseRevisionId: tree.revisionId, document });
     const readiness = taskTrees.scanPlanReadiness({ projectId: "p1", treeId: tree.treeId, scopeRootNodeId: "branch-a" });
     const workflow = database.get<{ revision: number }>("SELECT revision FROM workflow_states WHERE project_id = 'p1' AND active = 1")!;
@@ -92,6 +102,39 @@ describe("WorkflowService", () => {
     ]);
     expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'branch-a'")).toEqual({ status: "blocked_by_unconfirmed_dependency" });
     expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'branch-b'")).toEqual({ status: "draft" });
+    database.close();
+  });
+
+  it("retains an inherited confirmed sibling when accepting a changed branch revision", async () => {
+    const { database, tree, service } = await fixture();
+    const taskTrees = new TaskTreeService(database);
+    database.run("UPDATE workflow_states SET stage = 'task_tree_refinement' WHERE project_id = 'p1'");
+    const first = taskTrees.saveDraftRevision({ projectId: "p1", treeId: tree.treeId, baseRevisionId: tree.revisionId, document: branchDocument });
+    database.run(
+      "UPDATE task_node_confirmation_states SET state = CASE task_node_id WHEN 'root' THEN 'partial_confirmed' ELSE 'confirmed' END WHERE tree_revision_id = ?",
+      first.revisionId,
+    );
+    const changedDocument = {
+      ...branchDocument,
+      nodes: branchDocument.nodes.map((node) => node.id === "branch-a" ? { ...node, title: "A revised" } : node),
+    };
+    const second = taskTrees.saveDraftRevision({ projectId: "p1", treeId: tree.treeId, baseRevisionId: first.revisionId, document: changedDocument });
+    const readiness = taskTrees.scanPlanReadiness({ projectId: "p1", treeId: tree.treeId, scopeRootNodeId: "branch-a" });
+    const workflow = database.get<{ revision: number }>("SELECT revision FROM workflow_states WHERE project_id = 'p1' AND active = 1")!;
+    const prompt = service.createConfirmationPrompt({
+      projectId: "p1", treeId: tree.treeId, scopeId: "branch-a", scopeRootNodeId: "branch-a",
+      readinessResultId: readiness.resultId, prompt: "Confirm revised A?", workflowRevision: workflow.revision,
+    });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('revision-answer', 'p1', ?, 's1', 'UserPromptSubmit', '{\"text\":\"yes\"}', 'now', 'revision-answer')", tree.treeId);
+    service.confirmScope({ projectId: "p1", confirmationId: prompt.confirmationId, answer: "yes", answerTraceEventId: "revision-answer", workflowRevision: workflow.revision });
+
+    expect(database.all<{ task_node_id: string; state: string }>(
+      "SELECT task_node_id, state FROM task_node_confirmation_states WHERE tree_revision_id = ? ORDER BY task_node_id", second.revisionId,
+    )).toEqual([
+      { task_node_id: "branch-a", state: "confirmed" },
+      { task_node_id: "branch-b", state: "confirmed" },
+      { task_node_id: "root", state: "partial_confirmed" },
+    ]);
     database.close();
   });
 
