@@ -1,4 +1,5 @@
 import { HarnessError } from "../domain/errors.js";
+import { deriveConfirmationStates, resolveConfirmationScope, type ConfirmationState } from "../domain/confirmation.js";
 import { newId, nowIso } from "../domain/ids.js";
 import { canonicalJson } from "../domain/trace.js";
 import { validateTaskTree, type TaskTreeDocument } from "../domain/task-tree.js";
@@ -71,6 +72,10 @@ export class TaskTreeService {
       );
       this.database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES (?, ?, NULL, ?, ?)", nodeId, treeId, input.title.trim(), "draft");
       this.database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, ?)", newId(), nodeId, revisionId, canonicalJson(document.nodes[0]), timestamp);
+      this.database.run(
+        "INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES (?, ?, ?, ?, 'draft', ?)",
+        input.projectId, treeId, revisionId, nodeId, timestamp,
+      );
       this.database.run("INSERT INTO workflow_states (id, project_id, tree_id, stage, revision, active, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)", newId(), input.projectId, treeId, "draft_task_tree", 1, timestamp);
       this.database.run("INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at) VALUES (?, ?, ?, '{}', ?)", input.projectId, treeId, nodeId, timestamp);
     });
@@ -109,16 +114,23 @@ export class TaskTreeService {
     });
   }
 
-  scanPlanReadiness(input: { projectId: string; treeId: string }) {
+  scanPlanReadiness(input: { projectId: string; treeId: string; scopeRootNodeId?: string }) {
     const tree = this.requireTree(input.projectId, input.treeId);
     const revision = this.requireRevision(tree.current_revision_id);
-    const validation = validateTaskTree(JSON.parse(revision.document_json) as TaskTreeDocument);
-    const result = { resultId: newId(), treeId: tree.id, revisionId: revision.id, ready: validation.ok, blockers: validation.errors };
+    const document = JSON.parse(revision.document_json) as TaskTreeDocument;
+    const coveredNodeIds = resolveConfirmationScope(document, input.scopeRootNodeId);
+    if (!coveredNodeIds) throw new HarnessError("not_found", "confirmation scope root was not found in the current Task Tree revision");
+    const validation = validateTaskTree(document);
+    const scopeKind = input.scopeRootNodeId ? "branch" as const : "tree" as const;
+    const result = {
+      resultId: newId(), treeId: tree.id, revisionId: revision.id, ready: validation.ok, blockers: validation.errors,
+      scopeKind, scopeRootNodeId: input.scopeRootNodeId ?? null, coveredNodeIds,
+    };
     this.database.transaction(() => {
       const timestamp = nowIso();
       this.database.run(
-        "INSERT INTO plan_readiness_results (id, tree_id, revision_id, ready, blockers_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        result.resultId, tree.id, revision.id, result.ready ? 1 : 0, canonicalJson(result.blockers), timestamp,
+        "INSERT INTO plan_readiness_results (id, tree_id, revision_id, ready, blockers_json, created_at, scope_kind, scope_root_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        result.resultId, tree.id, revision.id, result.ready ? 1 : 0, canonicalJson(result.blockers), timestamp, scopeKind, input.scopeRootNodeId ?? null,
       );
       if (result.ready) {
         this.database.run(
@@ -142,6 +154,37 @@ export class TaskTreeService {
     const revision = current.revision + 1;
     const timestamp = nowIso();
     const work = () => {
+      const previousStates = new Map(this.database.all<{
+        task_node_id: string; state: ConfirmationState; source_confirmation_id: string | null;
+      }>(
+        "SELECT task_node_id, state, source_confirmation_id FROM task_node_confirmation_states WHERE tree_revision_id = ?",
+        current.id,
+      ).map((row) => [row.task_node_id, row]));
+      const previousBodies = new Map(this.database.all<{ node_id: string; body_json: string }>(
+        "SELECT node_id, body_json FROM task_node_revisions WHERE tree_revision_id = ?",
+        current.id,
+      ).map((row) => [row.node_id, row.body_json]));
+      const changedNodeIds = new Set(document.nodes.flatMap((node) =>
+        previousBodies.get(node.id) !== canonicalJson(node) ? [node.id] : []));
+      const byId = new Map(document.nodes.map((node) => [node.id, node]));
+      const invalidatedConfirmedAncestors = new Set<string>();
+      for (const changedNodeId of changedNodeIds) {
+        let parentId = byId.get(changedNodeId)?.parentId ?? null;
+        while (parentId) {
+          if (previousStates.get(parentId)?.state === "confirmed") invalidatedConfirmedAncestors.add(parentId);
+          parentId = byId.get(parentId)?.parentId ?? null;
+        }
+      }
+      const confirmedNodeIds = new Set<string>();
+      const pendingNodeIds = new Set<string>();
+      for (const node of document.nodes) {
+        const previousState = previousStates.get(node.id)?.state;
+        const changed = changedNodeIds.has(node.id) || invalidatedConfirmedAncestors.has(node.id);
+        if (changed && previousState && previousState !== "draft") pendingNodeIds.add(node.id);
+        else if (previousState === "confirmed") confirmedNodeIds.add(node.id);
+        else if (previousState === "pending_user_confirmation") pendingNodeIds.add(node.id);
+      }
+      const confirmationStates = deriveConfirmationStates(document, confirmedNodeIds, pendingNodeIds);
       this.database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES (?, ?, ?, ?, ?)", revisionId, tree.id, revision, canonicalJson(document), timestamp);
       for (const node of document.nodes) {
         const bodyJson = canonicalJson(node);
@@ -163,6 +206,12 @@ export class TaskTreeService {
         const nodeRevisionId = newId();
         this.database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, ?)", nodeRevisionId, node.id, revisionId, bodyJson, timestamp);
         if (node.children.length === 0) this.database.run("INSERT INTO leaf_task_contracts (node_revision_id, contract_json) VALUES (?, ?)", nodeRevisionId, bodyJson);
+        this.database.run(
+          "INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, source_confirmation_id, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          projectId, tree.id, revisionId, node.id, confirmationStates[node.id] ?? "draft",
+          confirmedNodeIds.has(node.id) ? previousStates.get(node.id)?.source_confirmation_id ?? null : null,
+          timestamp,
+        );
       }
       for (const artifact of document.artifacts) {
         this.database.run(

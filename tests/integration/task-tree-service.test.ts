@@ -19,6 +19,25 @@ const validDocument = {
   relations: [],
   artifacts: [{ id: "a1", kind: "file" as const, locator: "src/runtime.ts", status: "draft" as const }],
 };
+const branchedDocument = {
+  nodes: [
+    { id: "root", parentId: null, title: "Build runtime", children: ["branch-a", "branch-b"] },
+    {
+      id: "branch-a", parentId: "root", title: "Branch A", children: [], objectives: ["Implement A"],
+      expectedOutputs: ["a.ts"], acceptanceCriteria: ["A passes"], unresolvedQuestions: [], unresolvedDecisions: [],
+      dependencies: [], requiredEvidence: [{ key: "a-test", description: "A tests" }], executionPhase: "implementation" as const,
+      stopDecompositionReason: "one independently verifiable branch",
+    },
+    {
+      id: "branch-b", parentId: "root", title: "Branch B", children: [], objectives: ["Implement B"],
+      expectedOutputs: ["b.ts"], acceptanceCriteria: ["B passes"], unresolvedQuestions: [], unresolvedDecisions: [],
+      dependencies: [], requiredEvidence: [{ key: "b-test", description: "B tests" }], executionPhase: "implementation" as const,
+      stopDecompositionReason: "one independently verifiable branch",
+    },
+  ],
+  relations: [],
+  artifacts: [],
+};
 async function fixture() {
   const directory = await mkdtemp(path.join(tmpdir(), "harness-tree-"));
   dirs.push(directory);
@@ -82,6 +101,26 @@ describe("TaskTreeService", () => {
     database.close();
   });
 
+  it("records readiness for an exact branch scope and rejects unknown roots", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: branchedDocument });
+    const result = service.scanPlanReadiness({ projectId: "p1", treeId: root.treeId, scopeRootNodeId: "branch-a" });
+    expect(result).toMatchObject({
+      revisionId: draft.revisionId,
+      ready: true,
+      scopeKind: "branch",
+      scopeRootNodeId: "branch-a",
+      coveredNodeIds: ["branch-a"],
+    });
+    expect(database.get<{ scope_kind: string; scope_root_node_id: string }>(
+      "SELECT scope_kind, scope_root_node_id FROM plan_readiness_results WHERE id = ?", result.resultId,
+    )).toEqual({ scope_kind: "branch", scope_root_node_id: "branch-a" });
+    expect(() => service.scanPlanReadiness({ projectId: "p1", treeId: root.treeId, scopeRootNodeId: "missing" }))
+      .toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
+
   it("marks a changed succeeded node as needing revalidation in the new revision", async () => {
     const { database, service } = await fixture();
     const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
@@ -93,6 +132,29 @@ describe("TaskTreeService", () => {
     };
     service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: first.revisionId, document: changed });
     expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'leaf'")).toEqual({ status: "needs_revalidation" });
+    database.close();
+  });
+
+  it("preserves an unchanged confirmed sibling and invalidates only the changed branch", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const first = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: branchedDocument });
+    database.run(
+      "UPDATE task_node_confirmation_states SET state = CASE task_node_id WHEN 'root' THEN 'partial_confirmed' ELSE 'confirmed' END WHERE tree_revision_id = ?",
+      first.revisionId,
+    );
+    const changed = {
+      ...branchedDocument,
+      nodes: branchedDocument.nodes.map((node) => node.id === "branch-a" ? { ...node, title: "Branch A revised" } : node),
+    };
+    const second = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: first.revisionId, document: changed });
+    expect(database.all<{ task_node_id: string; state: string }>(
+      "SELECT task_node_id, state FROM task_node_confirmation_states WHERE tree_revision_id = ? ORDER BY task_node_id", second.revisionId,
+    )).toEqual([
+      { task_node_id: "branch-a", state: "pending_user_confirmation" },
+      { task_node_id: "branch-b", state: "confirmed" },
+      { task_node_id: "root", state: "partial_confirmed" },
+    ]);
     database.close();
   });
 });
