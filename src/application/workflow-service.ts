@@ -145,6 +145,17 @@ export class WorkflowService {
       confirmation.scope_kind, confirmation.scope_root_node_id, canonicalJson(coveredNodeIds), confirmation.id,
       input.answerTraceEventId, timestamp);
 
+      for (const taskNodeId of coveredNodeIds) {
+        this.database.run(`
+          UPDATE artifacts SET
+            status = 'planned', planned_by_task_node_id = ?, plan_baseline_at = ?, updated_at = ?
+          WHERE tree_id = ? AND status = 'draft' AND EXISTS (
+            SELECT 1 FROM task_node_artifact_links l
+            WHERE l.artifact_id = artifacts.id AND l.tree_revision_id = ? AND l.task_node_id = ?
+          )
+        `, taskNodeId, timestamp, timestamp, confirmation.tree_id, confirmation.tree_revision_id, taskNodeId);
+      }
+
       const records = this.database.all<{ id: string; covered_node_ids_json: string }>(`
         SELECT id, covered_node_ids_json FROM scope_confirmation_records
         WHERE tree_id = ? AND tree_revision_id = ? ORDER BY created_at, id
@@ -193,7 +204,6 @@ export class WorkflowService {
       if (allConfirmed) {
         const transition = canTransitionWorkflow(workflow.stage, "skeleton_pass", { confirmationId: confirmation.id });
         if (!transition.ok) throw new HarnessError(transition.code, transition.reason);
-        this.database.run("UPDATE artifacts SET status = 'planned', updated_at = ? WHERE tree_id = ? AND status = 'draft'", timestamp, confirmation.tree_id);
         this.database.run("UPDATE workflow_states SET stage = 'skeleton_pass', revision = revision + 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
         this.database.run("UPDATE task_trees SET status = 'confirmed', updated_at = ? WHERE id = ?", timestamp, confirmation.tree_id);
       } else {
