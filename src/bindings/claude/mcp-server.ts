@@ -64,15 +64,22 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   })));
 
   server.registerTool("harness_scan_plan_readiness", {
-    description: "Run deterministic structure and Leaf Task Contract checks for a Task Tree.",
-    inputSchema: { cwd: cwdSchema, treeId: z.string() },
-  }, ({ cwd, treeId }) => guarded(async () => runtime.taskTrees.scanPlanReadiness({ projectId: (await existingProject(cwd)).projectId, treeId })));
+    description: "Run deterministic structure and Leaf Task Contract checks for a Task Tree or branch scope.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string(), scopeRootNodeId: z.string().optional() },
+  }, ({ cwd, treeId, scopeRootNodeId }) => guarded(async () => runtime.taskTrees.scanPlanReadiness({
+    projectId: (await existingProject(cwd)).projectId, treeId,
+    ...(scopeRootNodeId ? { scopeRootNodeId } : {}),
+  })));
 
   server.registerTool("harness_create_confirmation_prompt", {
     description: "Persist a runtime confirmation prompt for an executable Task Tree scope.",
-    inputSchema: { cwd: cwdSchema, treeId: z.string(), scopeId: z.string(), prompt: z.string().min(1), workflowRevision: z.number().int() },
-  }, ({ cwd, treeId, scopeId, prompt, workflowRevision }) => guarded(async () => runtime.workflows.createConfirmationPrompt({
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string(), scopeId: z.string(), scopeRootNodeId: z.string().optional(),
+      readinessResultId: z.string().optional(), prompt: z.string().min(1), workflowRevision: z.number().int(),
+    },
+  }, ({ cwd, treeId, scopeId, scopeRootNodeId, readinessResultId, prompt, workflowRevision }) => guarded(async () => runtime.workflows.createConfirmationPrompt({
     projectId: (await existingProject(cwd)).projectId, treeId, scopeId, prompt, workflowRevision,
+    ...(scopeRootNodeId ? { scopeRootNodeId } : {}), ...(readinessResultId ? { readinessResultId } : {}),
   })));
 
   server.registerTool("harness_confirm_scope", {

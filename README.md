@@ -2,12 +2,14 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation 以及 Node Execution & Evaluation 两个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation 以及 Node Execution & Evaluation 三个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
 - Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
-- 规划、分支确认、Skeleton、实现和验证工作流状态；
+- 规划、版本绑定的分支确认、Skeleton、实现和验证工作流状态；
+- 分支确认记录不可变；节点确认状态与执行状态分离，支持 `draft`、`pending_user_confirmation`、`confirmed`、`partial_confirmed`；
+- 修改一个已确认分支时，仅该分支重新确认，未变化兄弟分支保留确认；跨分支依赖未确认时节点处于 `blocked_by_unconfirmed_dependency`；
 - Claude 生命周期 Hook 的幂等、脱敏 Trace 与 Artifact 投影；
 - Snapshot、Summary、Detail 与分页 Trace 查询；
 - 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
@@ -69,6 +71,18 @@ harness node evaluate ATTEMPT_ID succeeded
 ```
 
 `evaluate ... succeeded` 只是提出成功结论。Runtime 会核对当前修订、所需证据、依赖节点与子节点状态；条件不完整时会把 Evaluation 记录为 `uncertain`，不会把节点标成成功。
+
+### 分支确认链路
+
+Agent 通过 Runtime Tools 执行下列链路：
+
+1. 调用 `harness_scan_plan_readiness`，传入 `treeId`；只确认某一分支时同时传入 `scopeRootNodeId`。
+2. 使用返回的 `resultId` 调用 `harness_create_confirmation_prompt`，将其作为 `readinessResultId`，并原样传入同一个 `scopeRootNodeId`。
+3. 用户回答由 Hook 记录成 `UserPromptSubmit` Trace Event。
+4. 调用 `harness_confirm_scope`，传入该 Trace Event ID。
+5. 通过 `harness_get_task_tree_summary` 查看每个节点的 `confirmationState` 和聚合 `confirmationCounts`。
+
+Readiness 结果和确认提示都绑定创建时的 Task Tree revision。树结构发生变化后，旧提示会返回 `revision_conflict`，不会被套用到新版本。部分分支确认不会自动确认兄弟分支，也不会让未确认节点进入执行阶段。
 
 ## 在 Claude Code 中加载
 

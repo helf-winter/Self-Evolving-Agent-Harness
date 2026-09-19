@@ -17,6 +17,7 @@ async function fixture() {
   database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES (?, ?, ?, ?, ?)", "tr1", "t1", 1, "{}", "2026-01-01T00:00:00.000Z");
   database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES (?, ?, ?, ?, ?)", "n1", "t1", null, "Implement", "ready");
   database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, ?)", "n1-r1", "n1", "tr1", JSON.stringify({ id: "n1", executionPhase: "implementation", dependencies: [], requiredEvidence: [{ key: "test", description: "tests pass" }] }), "2026-01-01T00:00:00.000Z");
+  database.run("INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES ('p1', 't1', 'tr1', 'n1', 'confirmed', '2026-01-01T00:00:00.000Z')");
   database.run("INSERT INTO workflow_states (id, project_id, tree_id, stage, revision, active, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)", "w1", "p1", "t1", "branch_implementation", 1, "2026-01-01T00:00:00.000Z");
   const executions = new NodeExecutionService(database);
   const evaluations = new EvaluationService(database);

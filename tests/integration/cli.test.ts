@@ -55,6 +55,7 @@ describe("harness CLI", () => {
     const nodeId = tree.document.nodes[0]!.id;
     database.run("UPDATE task_nodes SET status = 'ready' WHERE id = ?", nodeId);
     database.run("UPDATE task_node_revisions SET body_json = ? WHERE node_id = ?", JSON.stringify({ id: nodeId, executionPhase: "implementation", dependencies: [], requiredEvidence: [{ key: "test", description: "tests pass" }] }), nodeId);
+    database.run("UPDATE task_node_confirmation_states SET state = 'confirmed' WHERE tree_revision_id = ? AND task_node_id = ?", tree.revisionId, nodeId);
     database.run("UPDATE workflow_states SET stage = 'branch_implementation' WHERE tree_id = ?", tree.treeId);
     database.close();
 

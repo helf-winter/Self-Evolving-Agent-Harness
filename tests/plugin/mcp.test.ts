@@ -18,7 +18,8 @@ describe("Harness MCP binding", () => {
     const client = new Client({ name: "test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([harness.server.connect(serverTransport), client.connect(clientTransport)]);
-    const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+    const tools = (await client.listTools()).tools;
+    const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
       "harness_apply_draft_change_set", "harness_confirm_scope", "harness_create_confirmation_prompt",
       "harness_create_task_root", "harness_get_runtime_snapshot", "harness_get_task_node_detail",
@@ -26,6 +27,12 @@ describe("Harness MCP binding", () => {
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
     ].sort());
+    expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
+      properties: { scopeRootNodeId: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_create_confirmation_prompt")?.inputSchema).toMatchObject({
+      properties: { scopeRootNodeId: { type: "string" }, readinessResultId: { type: "string" } },
+    });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
     const snapshot = await client.callTool({ name: "harness_get_runtime_snapshot", arguments: { cwd: project } });
