@@ -31,9 +31,13 @@ describe("RuntimeQueryService", () => {
     const { database, tree, service } = await fixture();
     expect(service.getRuntimeSnapshot("p1")).toMatchObject({
       selectedTreeId: tree.treeId, workflow: { stage: "draft_task_tree", revision: 1 }, pendingConfirmation: { confirmationId: "c1" },
-      activeAttemptCount: 0,
+      activeAttemptCount: 0, confirmationCounts: { draft: 1, pendingUserConfirmation: 0, confirmed: 0, partialConfirmed: 0 },
     });
-    expect(service.getTaskTreeSummary("p1", tree.treeId)).toMatchObject({ treeId: tree.treeId, title: "Runtime", traceCount: 2, attemptCount: 1, evaluationCount: 1 });
+    expect(service.getTaskTreeSummary("p1", tree.treeId)).toMatchObject({
+      treeId: tree.treeId, title: "Runtime", traceCount: 2, attemptCount: 1, evaluationCount: 1,
+      confirmationCounts: { draft: 1, pendingUserConfirmation: 0, confirmed: 0, partialConfirmed: 0 },
+      nodes: [expect.objectContaining({ confirmationState: "draft" })],
+    });
     database.close();
   });
 
@@ -41,6 +45,7 @@ describe("RuntimeQueryService", () => {
     const { database, tree, service } = await fixture();
     const nodeId = tree.document.nodes[0]!.id;
     const detail = service.getTaskNodeDetail("p1", nodeId, { limit: 1 });
+    expect(detail.confirmationState).toBe("draft");
     expect(detail.evidence).toHaveLength(1);
     expect(detail.attempts).toEqual([expect.objectContaining({ attemptId: "a1", attemptNumber: 1, status: "failed" })]);
     expect(detail.evaluations).toEqual([expect.objectContaining({ evaluationId: "v1", attemptId: "a1", verdict: "failed" })]);

@@ -20,6 +20,9 @@ async function fixture() {
   database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES (?, ?, ?, ?, ?)", "n1", "t1", "dep", "Implement", "ready");
   database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, ?)", "dep-r1", "dep", "tr1", JSON.stringify({ id: "dep", executionPhase: "implementation", dependencies: [], requiredEvidence: [{ key: "dep-test", description: "dependency test" }] }), "2026-01-01T00:00:00.000Z");
   database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, ?)", "n1-r1", "n1", "tr1", JSON.stringify({ id: "n1", executionPhase: "implementation", dependencies: ["dep"], requiredEvidence: [{ key: "test", description: "tests pass" }] }), "2026-01-01T00:00:00.000Z");
+  for (const nodeId of ["dep", "n1"]) {
+    database.run("INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES ('p1', 't1', 'tr1', ?, 'confirmed', '2026-01-01T00:00:00.000Z')", nodeId);
+  }
   database.run("INSERT INTO workflow_states (id, project_id, tree_id, stage, revision, active, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)", "w1", "p1", "t1", "branch_implementation", 1, "2026-01-01T00:00:00.000Z");
   database.run("INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at) VALUES (?, ?, ?, '{}', ?)", "p1", "t1", "dep", "2026-01-01T00:00:00.000Z");
   return { database, service: new NodeExecutionService(database) };
@@ -28,6 +31,15 @@ async function fixture() {
 afterEach(async () => Promise.all(dirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
 
 describe("NodeExecutionService", () => {
+  it("rejects a ready node unless its current revision is confirmed", async () => {
+    const { database, service } = await fixture();
+    database.run("UPDATE task_node_confirmation_states SET state = 'draft' WHERE tree_revision_id = 'tr1' AND task_node_id = 'n1'");
+    expect(() => service.startAttempt({ projectId: "p1", nodeId: "n1", expectedTreeRevisionId: "tr1" }))
+      .toThrow(expect.objectContaining({ code: "attempt_not_executable" }));
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM execution_attempts")?.count).toBe(0);
+    database.close();
+  });
+
   it("starts one current-revision attempt and increments retry numbers", async () => {
     const { database, service } = await fixture();
     const first = service.startAttempt({ projectId: "p1", nodeId: "n1", expectedTreeRevisionId: "tr1" });

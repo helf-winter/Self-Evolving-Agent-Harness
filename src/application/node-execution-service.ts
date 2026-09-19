@@ -13,6 +13,7 @@ interface ExecutableNodeRow {
   node_revision_id: string;
   body_json: string;
   workflow_stage: WorkflowStage;
+  confirmation_state: string;
 }
 
 interface AttemptRow {
@@ -77,6 +78,9 @@ export class NodeExecutionService {
       }
       if (!(["ready", "failed", "needs_revalidation"] as string[]).includes(node.node_status)) {
         throw new HarnessError("attempt_not_executable", `Task Node status ${node.node_status} is not executable`);
+      }
+      if (node.confirmation_state !== "confirmed") {
+        throw new HarnessError("attempt_not_executable", "current Task Node revision is not confirmed");
       }
       const body = JSON.parse(node.body_json) as TaskNodeInput;
       if (!body.requiredEvidence?.length) {
@@ -153,10 +157,11 @@ export class NodeExecutionService {
     const row = this.database.get<ExecutableNodeRow>(`
       SELECT n.id AS node_id, n.tree_id, n.status AS node_status,
              t.current_revision_id, nr.id AS node_revision_id, nr.body_json,
-             w.stage AS workflow_stage
+             w.stage AS workflow_stage, cs.state AS confirmation_state
       FROM task_nodes n
       JOIN task_trees t ON t.id = n.tree_id
       JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = t.current_revision_id
+      JOIN task_node_confirmation_states cs ON cs.task_node_id = n.id AND cs.tree_revision_id = t.current_revision_id
       JOIN workflow_states w ON w.tree_id = t.id AND w.project_id = t.project_id AND w.active = 1
       WHERE n.id = ? AND t.project_id = ?
     `, nodeId, projectId);

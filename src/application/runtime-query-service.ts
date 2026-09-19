@@ -44,6 +44,7 @@ export class RuntimeQueryService {
       "SELECT count(*) AS count FROM execution_attempts WHERE project_id = ? AND status IN ('running', 'verifying')",
       projectId,
     )?.count ?? 0;
+    const confirmationCounts = this.getConfirmationCounts(projectId, state?.selected_tree_id ?? workflow?.tree_id ?? null);
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
@@ -52,6 +53,7 @@ export class RuntimeQueryService {
       pendingConfirmation: confirmation ? { confirmationId: confirmation.id, scopeId: confirmation.scope_id, prompt: confirmation.prompt } : null,
       blockerCount: readiness ? (JSON.parse(readiness.blockers_json) as unknown[]).length : 0,
       activeAttemptCount,
+      confirmationCounts,
       availableActions: this.availableActions(workflow?.stage),
     };
   }
@@ -69,14 +71,23 @@ export class RuntimeQueryService {
     const count = this.database.get<{ count: number }>("SELECT count(*) AS count FROM trace_events WHERE project_id = ? AND tree_id = ?", projectId, treeId)?.count ?? 0;
     const attemptCount = this.database.get<{ count: number }>("SELECT count(*) AS count FROM execution_attempts WHERE project_id = ? AND tree_id = ?", projectId, treeId)?.count ?? 0;
     const evaluationCount = this.database.get<{ count: number }>("SELECT count(*) AS count FROM evaluations WHERE project_id = ? AND tree_id = ?", projectId, treeId)?.count ?? 0;
+    const confirmationRows = this.database.all<{ task_node_id: string; state: string }>(`
+      SELECT task_node_id, state FROM task_node_confirmation_states
+      WHERE tree_revision_id = ?
+    `, tree.current_revision_id);
+    const confirmationByNode = new Map(confirmationRows.map((row) => [row.task_node_id, row.state]));
     return {
       treeId: tree.id, title: tree.title, status: tree.status, revision: revision.revision,
-      nodes: document.nodes.map((node) => ({ id: node.id, parentId: node.parentId, title: node.title, children: node.children })),
+      nodes: document.nodes.map((node) => ({
+        id: node.id, parentId: node.parentId, title: node.title, children: node.children,
+        confirmationState: confirmationByNode.get(node.id) ?? "draft",
+      })),
       relations: document.relations,
       artifacts,
       traceCount: count,
       attemptCount,
       evaluationCount,
+      confirmationCounts: this.getConfirmationCounts(projectId, treeId),
     };
   }
 
@@ -88,11 +99,12 @@ export class RuntimeQueryService {
     evaluationLimit?: number;
     evaluationCursor?: string;
   }) {
-    const row = this.database.get<{ tree_id: string; status: string; body_json: string }>(
-      `SELECT n.tree_id, n.status, nr.body_json FROM task_nodes n
+    const row = this.database.get<{ tree_id: string; status: string; body_json: string; confirmation_state: string }>(
+      `SELECT n.tree_id, n.status, nr.body_json, cs.state AS confirmation_state FROM task_nodes n
        JOIN task_trees t ON t.id = n.tree_id
        JOIN task_node_revisions nr ON nr.node_id = n.id
        JOIN task_tree_revisions tr ON tr.id = nr.tree_revision_id AND tr.id = t.current_revision_id
+       JOIN task_node_confirmation_states cs ON cs.task_node_id = n.id AND cs.tree_revision_id = t.current_revision_id
        WHERE n.id = ? AND t.project_id = ?`, nodeId, projectId,
     );
     if (!row) throw new HarnessError("not_found", "Task Node was not found in the current project");
@@ -140,6 +152,7 @@ export class RuntimeQueryService {
     return {
       treeId: row.tree_id,
       status: row.status,
+      confirmationState: row.confirmation_state,
       node: JSON.parse(row.body_json) as TaskNodeInput,
       attempts,
       attemptNextCursor: attemptRows.length > attemptLimit ? encodeCursor(attemptOffset + attemptLimit) : null,
@@ -173,6 +186,25 @@ export class RuntimeQueryService {
 
   private requireProject(projectId: string): void {
     if (!this.database.get("SELECT id FROM projects WHERE id = ?", projectId)) throw new HarnessError("not_found", "project was not found");
+  }
+
+  private getConfirmationCounts(projectId: string, treeId: string | null) {
+    const counts = { draft: 0, pendingUserConfirmation: 0, confirmed: 0, partialConfirmed: 0 };
+    if (!treeId) return counts;
+    const rows = this.database.all<{ state: string; count: number }>(`
+      SELECT cs.state, count(*) AS count
+      FROM task_node_confirmation_states cs
+      JOIN task_trees t ON t.id = cs.tree_id AND t.current_revision_id = cs.tree_revision_id
+      WHERE cs.project_id = ? AND cs.tree_id = ?
+      GROUP BY cs.state
+    `, projectId, treeId);
+    for (const row of rows) {
+      if (row.state === "draft") counts.draft = row.count;
+      else if (row.state === "pending_user_confirmation") counts.pendingUserConfirmation = row.count;
+      else if (row.state === "confirmed") counts.confirmed = row.count;
+      else if (row.state === "partial_confirmed") counts.partialConfirmed = row.count;
+    }
+    return counts;
   }
 
   private availableActions(stage?: string): string[] {
