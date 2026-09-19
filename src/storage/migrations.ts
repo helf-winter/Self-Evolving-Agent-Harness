@@ -163,4 +163,58 @@ export const migrations: Migration[] = [{
       created_at TEXT NOT NULL
     );
   `,
+}, {
+  version: 3,
+  sql: `
+    ALTER TABLE plan_readiness_results
+      ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'tree' CHECK(scope_kind IN ('tree', 'branch'));
+    ALTER TABLE plan_readiness_results ADD COLUMN scope_root_node_id TEXT;
+
+    ALTER TABLE runtime_confirmation_prompts
+      ADD COLUMN tree_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE RESTRICT;
+    ALTER TABLE runtime_confirmation_prompts
+      ADD COLUMN readiness_result_id TEXT REFERENCES plan_readiness_results(id) ON DELETE RESTRICT;
+    ALTER TABLE runtime_confirmation_prompts
+      ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'tree' CHECK(scope_kind IN ('tree', 'branch'));
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN scope_root_node_id TEXT;
+
+    CREATE TABLE scope_confirmation_records (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      scope_kind TEXT NOT NULL CHECK(scope_kind IN ('tree', 'branch')),
+      scope_root_node_id TEXT,
+      covered_node_ids_json TEXT NOT NULL,
+      confirmation_prompt_id TEXT NOT NULL UNIQUE REFERENCES runtime_confirmation_prompts(id) ON DELETE RESTRICT,
+      answer_trace_event_id TEXT NOT NULL REFERENCES trace_events(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      CHECK((scope_kind = 'tree' AND scope_root_node_id IS NULL) OR (scope_kind = 'branch' AND scope_root_node_id IS NOT NULL))
+    );
+    CREATE INDEX scope_confirmation_tree_revision_idx
+      ON scope_confirmation_records(tree_id, tree_revision_id, created_at DESC);
+
+    CREATE TABLE task_node_confirmation_states (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      state TEXT NOT NULL CHECK(state IN ('draft', 'pending_user_confirmation', 'confirmed', 'partial_confirmed')),
+      source_confirmation_id TEXT REFERENCES scope_confirmation_records(id) ON DELETE SET NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(tree_revision_id, task_node_id)
+    );
+    CREATE INDEX task_node_confirmation_current_idx
+      ON task_node_confirmation_states(project_id, tree_id, tree_revision_id, state);
+
+    INSERT INTO task_node_confirmation_states (
+      project_id, tree_id, tree_revision_id, task_node_id, state, source_confirmation_id, updated_at
+    )
+    SELECT t.project_id, t.id, t.current_revision_id, n.id,
+           CASE WHEN t.status = 'confirmed' THEN 'confirmed' ELSE 'draft' END,
+           NULL, t.updated_at
+    FROM task_trees t
+    JOIN task_nodes n ON n.tree_id = t.id
+    WHERE t.current_revision_id IS NOT NULL;
+  `,
 }];
