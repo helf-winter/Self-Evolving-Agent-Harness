@@ -309,4 +309,59 @@ export const migrations: Migration[] = [{
     );
     CREATE INDEX plan_drift_scope_idx ON plan_drift_records(project_id, tree_id, task_node_id, severity, resolution_status);
   `,
+}, {
+  version: 5,
+  sql: `
+    ALTER TABLE runtime_actions ADD COLUMN action_type TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN target_type TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN target_id TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN expected_revision TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN reason TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN source_message_ref TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN risk_level TEXT NOT NULL DEFAULT 'low'
+      CHECK(risk_level IN ('low', 'medium', 'high', 'irreversible'));
+    ALTER TABLE runtime_actions ADD COLUMN confirmation_requirement TEXT NOT NULL DEFAULT 'none'
+      CHECK(confirmation_requirement IN ('none', 'required', 'ambiguous'));
+    ALTER TABLE runtime_actions ADD COLUMN confirmation_prompt_id TEXT;
+    ALTER TABLE runtime_actions ADD COLUMN status TEXT NOT NULL DEFAULT 'proposed'
+      CHECK(status IN ('proposed', 'validated', 'pending_confirmation', 'committed', 'rejected', 'revision_conflict'));
+    ALTER TABLE runtime_actions ADD COLUMN committed_at TEXT;
+
+    UPDATE runtime_actions SET
+      action_type = kind,
+      status = 'committed',
+      committed_at = created_at
+    WHERE action_type IS NULL;
+
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN prompt_type TEXT NOT NULL DEFAULT 'branch_confirmation'
+      CHECK(prompt_type IN ('branch_confirmation', 'drift_resolution', 'change_confirmation', 'high_risk_action'));
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN related_task_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL;
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN related_artifact_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN options_json TEXT NOT NULL DEFAULT '["yes","no"]';
+    ALTER TABLE runtime_confirmation_prompts ADD COLUMN runtime_action_id TEXT REFERENCES runtime_actions(id) ON DELETE SET NULL;
+    CREATE UNIQUE INDEX runtime_confirmation_action_idx
+      ON runtime_confirmation_prompts(runtime_action_id) WHERE runtime_action_id IS NOT NULL;
+
+    CREATE TABLE user_change_requests (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL,
+      change_type TEXT NOT NULL CHECK(change_type IN ('minor_change', 'scope_change', 'priority_change')),
+      source_trace_event_id TEXT NOT NULL REFERENCES trace_events(id) ON DELETE RESTRICT,
+      expected_tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      summary TEXT NOT NULL,
+      change_impact_json TEXT NOT NULL,
+      proposed_document_json TEXT,
+      priority_target_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL,
+      prior_node_status TEXT,
+      status TEXT NOT NULL CHECK(status IN ('proposed', 'pending_confirmation', 'paused', 'applied', 'rejected', 'revision_conflict')),
+      runtime_action_id TEXT NOT NULL UNIQUE REFERENCES runtime_actions(id) ON DELETE RESTRICT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE INDEX user_change_scope_idx
+      ON user_change_requests(project_id, tree_id, task_node_id, change_type, status, created_at DESC);
+  `,
 }];

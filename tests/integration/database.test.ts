@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(4);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(5);
     reopened.close();
   });
 
@@ -103,6 +103,48 @@ describe("RuntimeDatabase", () => {
     expect(database.get<{ granularity: string; artifact_type: string; identity_strategy: string; confidence: string }>(
       "SELECT granularity, artifact_type, identity_strategy, confidence FROM artifacts WHERE id = 'a1'",
     )).toEqual({ granularity: "structural", artifact_type: "file", identity_strategy: "path", confidence: "observed" });
+    database.close();
+  });
+
+  it("adds typed Runtime Action, confirmation, and User Change persistence", async () => {
+    const database = new RuntimeDatabase(await databasePath());
+    const tables = database.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_change_requests'",
+    );
+    expect(tables).toEqual([{ name: "user_change_requests" }]);
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO task_trees (id, project_id, title, status, created_at, updated_at) VALUES ('t1', 'p1', 'Tree', 'confirmed', 'now', 'now')");
+    database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('tr1', 't1', 1, '{}', 'now')");
+    database.run("UPDATE task_trees SET current_revision_id = 'tr1' WHERE id = 't1'");
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('trace-1', 'p1', 't1', NULL, 's', 'UserPromptSubmit', '{}', 'now', 'trace-1')");
+    database.run("INSERT INTO runtime_actions (id, project_id, kind, input_json, result_json, created_at, action_type, target_type, target_id, expected_revision, reason, source_message_ref, risk_level, confirmation_requirement, status) VALUES ('ra1', 'p1', 'record_user_change', '{}', '{}', 'now', 'record_user_change', 'task_tree', 't1', 'tr1', 'Change scope', 'trace-1', 'high', 'required', 'pending_confirmation')");
+    database.run("INSERT INTO runtime_confirmation_prompts (id, project_id, tree_id, scope_id, prompt, status, created_at, prompt_type, related_artifact_ids_json, options_json, runtime_action_id) VALUES ('c1', 'p1', 't1', 't1', 'Apply?', 'pending', 'now', 'change_confirmation', '[]', '[\"yes\",\"no\",\"pause\"]', 'ra1')");
+    database.run("INSERT INTO user_change_requests (id, project_id, tree_id, task_node_id, change_type, source_trace_event_id, expected_tree_revision_id, summary, change_impact_json, proposed_document_json, priority_target_node_id, prior_node_status, status, runtime_action_id, created_at, updated_at) VALUES ('u1', 'p1', 't1', NULL, 'scope_change', 'trace-1', 'tr1', 'Change scope', '{}', '{}', NULL, NULL, 'pending_confirmation', 'ra1', 'now', 'now')");
+    expect(database.get<{ prompt_type: string; runtime_action_id: string }>("SELECT prompt_type, runtime_action_id FROM runtime_confirmation_prompts WHERE id = 'c1'")).toEqual({ prompt_type: "change_confirmation", runtime_action_id: "ra1" });
+    expect(() => database.run("INSERT INTO user_change_requests (id, project_id, tree_id, change_type, expected_tree_revision_id, summary, change_impact_json, status, runtime_action_id, created_at, updated_at) VALUES ('bad', 'p1', 't1', 'unknown', 'tr1', 'bad', '{}', 'applied', 'ra1', 'now', 'now')")).toThrow();
+    database.close();
+  });
+
+  it("backfills legacy Runtime Actions and branch confirmation prompts", async () => {
+    const filename = await databasePath();
+    const legacy = new DatabaseSync(filename);
+    legacy.exec("PRAGMA foreign_keys = ON; CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)");
+    for (const migration of migrations.slice(0, 4)) {
+      legacy.exec(migration.sql);
+      legacy.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, 'now')").run(migration.version);
+    }
+    legacy.prepare("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')").run();
+    legacy.prepare("INSERT INTO runtime_actions (id, project_id, kind, input_json, result_json, created_at) VALUES ('legacy-action', 'p1', 'legacy_kind', '{}', '{}', 'now')").run();
+    legacy.prepare("INSERT INTO runtime_confirmation_prompts (id, project_id, scope_id, prompt, status, created_at) VALUES ('legacy-prompt', 'p1', 'legacy', 'Confirm?', 'pending', 'now')").run();
+    legacy.close();
+
+    const database = new RuntimeDatabase(filename);
+    expect(database.get<{ action_type: string; status: string; confirmation_requirement: string }>("SELECT action_type, status, confirmation_requirement FROM runtime_actions WHERE id = 'legacy-action'")).toEqual({
+      action_type: "legacy_kind", status: "committed", confirmation_requirement: "none",
+    });
+    expect(database.get<{ prompt_type: string; related_artifact_ids_json: string; options_json: string }>("SELECT prompt_type, related_artifact_ids_json, options_json FROM runtime_confirmation_prompts WHERE id = 'legacy-prompt'")).toEqual({
+      prompt_type: "branch_confirmation", related_artifact_ids_json: "[]", options_json: '["yes","no"]',
+    });
     database.close();
   });
 });
