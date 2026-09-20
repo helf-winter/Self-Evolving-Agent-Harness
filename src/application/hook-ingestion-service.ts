@@ -67,7 +67,14 @@ export class HookIngestionService {
         eventId, project.projectId, workflow?.tree_id ?? null, workflow?.selected_node_id ?? null, event.sessionId, eventName, canonicalJson(payload), event.occurredAt, key,
       );
       if (event.eventName === "PostToolUse" || event.eventName === "PostToolUseFailure") {
-        this.projectArtifact(project.projectId, workflow?.tree_id, event, event.eventName === "PostToolUse" ? "observed" : "failed");
+        const artifactId = this.projectArtifact(project.projectId, workflow?.tree_id, eventId, event);
+        if (artifactId) {
+          this.database.run(
+            "UPDATE trace_events SET payload_json = ? WHERE id = ?",
+            canonicalJson({ ...(payload as Record<string, unknown>), artifactRefs: [artifactId] }),
+            eventId,
+          );
+        }
       }
     });
     return { recorded: true, eventId, violation, blocked: false };
@@ -82,22 +89,64 @@ export class HookIngestionService {
     return mutatingCommand.test(command) || outputRedirection.test(command);
   }
 
-  private projectArtifact(projectId: string, treeId: string | undefined, event: ClaudeHookEvent, status: "observed" | "failed"): void {
+  private projectArtifact(projectId: string, treeId: string | undefined, eventId: string, event: ClaudeHookEvent): string | undefined {
     let kind: "file" | "command" | undefined;
     let locator: string | undefined;
     const filePath = event.toolInput?.file_path ?? event.toolInput?.path;
     if (typeof filePath === "string") {
       kind = "file";
-      locator = path.isAbsolute(filePath) ? path.normalize(filePath).replaceAll("\\", "/") : filePath.replaceAll("\\", "/");
+      locator = this.normalizeFileLocator(event.cwd, filePath);
     } else if (event.toolName === "Bash" && typeof event.toolInput?.command === "string") {
       kind = "command";
       locator = event.toolInput.command;
     }
-    if (!kind || !locator) return;
+    if (!kind || !locator) return undefined;
+
+    const existing = this.database.get<{ id: string; status: string }>(
+      "SELECT id, status FROM artifacts WHERE project_id = ? AND kind = ? AND locator = ?",
+      projectId, kind, locator,
+    );
+    const failed = event.eventName === "PostToolUseFailure";
+    const mutation = kind === "file" && this.isMutation(event);
+    const verified = kind === "command" && !failed && this.isVerificationCommand(locator);
+    const status = failed
+      ? "failed"
+      : verified
+        ? "verified"
+        : mutation
+          ? existing ? "modified" : "created"
+          : existing?.status ?? "observed";
+    const confidence = verified ? "verified" : "observed";
+    const artifactId = existing?.id ?? newId();
     const timestamp = event.occurredAt;
     this.database.run(
-      "INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?) ON CONFLICT(project_id, kind, locator) DO UPDATE SET status = excluded.status, tree_id = COALESCE(excluded.tree_id, artifacts.tree_id), updated_at = excluded.updated_at",
-      newId(), projectId, treeId ?? null, kind, locator, status, timestamp, timestamp,
+      `INSERT INTO artifacts (
+         id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at,
+         granularity, artifact_type, path_or_name, identity_strategy, confidence, source_trace_event_id
+       ) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, 'structural', ?, ?, ?, ?, ?)
+       ON CONFLICT(project_id, kind, locator) DO UPDATE SET
+         status = excluded.status,
+         tree_id = COALESCE(excluded.tree_id, artifacts.tree_id),
+         path_or_name = excluded.path_or_name,
+         confidence = excluded.confidence,
+         source_trace_event_id = excluded.source_trace_event_id,
+         updated_at = excluded.updated_at`,
+      artifactId, projectId, treeId ?? null, kind, locator, status, timestamp, timestamp,
+      kind, locator, kind === "command" ? "command_signature" : "path", confidence, eventId,
     );
+    return artifactId;
+  }
+
+  private normalizeFileLocator(cwd: string, filePath: string): string {
+    if (!path.isAbsolute(filePath)) return path.normalize(filePath).replaceAll("\\", "/");
+    const relative = path.relative(path.resolve(cwd), path.resolve(filePath));
+    if (relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      return relative.replaceAll("\\", "/");
+    }
+    return path.normalize(filePath).replaceAll("\\", "/");
+  }
+
+  private isVerificationCommand(command: string): boolean {
+    return /(?:^|\s|&&|;)(?:npm\s+(?:test|run\s+(?:test|build|lint|typecheck|check))|pnpm\s+(?:test|build|lint|typecheck|check)|yarn\s+(?:test|build|lint|typecheck|check)|npx\s+(?:vitest|tsc|eslint)|pytest|python\s+-m\s+pytest|cargo\s+(?:test|check|build)|go\s+test)(?:\s|$)/i.test(command);
   }
 }

@@ -43,13 +43,16 @@ describe("runtime foundation vertical slice", () => {
     first.close();
 
     const reopened = openRuntime(environment);
-    const resolved = await reopened.projects.resolve(projectDir, "inspect");
-    const snapshot = reopened.queries.getRuntimeSnapshot(resolved.projectId);
-    const summary = reopened.queries.getTaskTreeSummary(resolved.projectId, root.treeId);
-    expect(snapshot).toMatchObject({ workflow: { stage: "skeleton_pass", revision: 4 }, pendingConfirmation: null });
-    expect(summary.traceCount).toBe(2);
-    expect(summary.artifacts.some((artifact) => artifact.status === "observed")).toBe(true);
-    expect(reopened.queries.getTaskNodeDetail(resolved.projectId, "health-leaf", { limit: 10 }).node.title).toBe("Implement route");
-    reopened.close();
+    try {
+      const resolved = await reopened.projects.resolve(projectDir, "inspect");
+      const snapshot = reopened.queries.getRuntimeSnapshot(resolved.projectId);
+      const summary = reopened.queries.getTaskTreeSummary(resolved.projectId, root.treeId);
+      expect(snapshot).toMatchObject({ workflow: { stage: "skeleton_pass", revision: 4 }, pendingConfirmation: null });
+      expect(summary.traceCount).toBe(2);
+      expect(summary.artifacts.some((artifact) => artifact.status === "modified")).toBe(true);
+      expect(reopened.queries.getTaskNodeDetail(resolved.projectId, "health-leaf", { limit: 10 }).node.title).toBe("Implement route");
+    } finally {
+      reopened.close();
+    }
   });
 });
