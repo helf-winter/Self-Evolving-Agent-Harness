@@ -41,6 +41,9 @@ describe("Harness MCP binding", () => {
       "harness_execute_task_node_replacement", "harness_recover_task_node_replacement",
       "harness_get_task_node_replacements", "harness_get_task_node_replacement_detail",
       "harness_get_project_identity", "harness_get_project_clones", "harness_get_project_clone_detail",
+      "harness_register_plugin_revision", "harness_reconcile_plugins", "harness_get_plugins", "harness_get_plugin_detail",
+      "harness_preview_plugin_replacement", "harness_execute_plugin_replacement", "harness_recover_plugin_replacement",
+      "harness_get_plugin_replacement_detail", "harness_dispose_plugin", "harness_reactivate_plugin",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -101,6 +104,19 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_task_node_replacements", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_project_identity", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_project_clones", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({
+      name: "harness_register_plugin_revision",
+      arguments: {
+        pluginId: "test-runtime-plugin",
+        manifest: {
+          revision: "1.0.0", provides: [{ contractId: "test-runtime", version: "1" }], requires: [],
+          registrations: [], effects: [], metadata: { binding: "test" },
+        },
+      },
+    })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_plugins", arguments: { state: "active" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_plugin_detail", arguments: { pluginId: "test-runtime-plugin" } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_reconcile_plugins", arguments: {} })).isError).not.toBe(true);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {

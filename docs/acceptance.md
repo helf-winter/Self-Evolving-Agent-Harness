@@ -162,14 +162,31 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 额外验证：旧 revision、跨 Project ID、拓扑变化、未知 Contract、缺失/过早证据、遗漏 Effect disposition、irreversible 自动处置均被拒绝，且不得留下部分 Tree 激活。
 
-## 10. 安全检查
+## 10. Plugin Composition Contract
+
+通过 Claude MCP 或 Runtime API 使用两个稳定 Plugin ID：一个 provider 提供 `trace@1`，一个 consumer 要求 `trace@1`：
+
+1. 先注册 consumer revision；确认其为 `pending_dependency`，缺失项为 `trace@1`，registration 为 declared，Effect 为 pending。
+2. 注册 provider revision；确认固定点协调后两者均为 active，并形成指向精确 provider revision 的 Dependency Edge。
+3. 注册只提供 `trace@2` 的 provider；确认要求 `trace@1` 的 consumer 不会因名称相同而误激活。
+4. 对 provider 提交 replacement preview；确认 current revision 不变，返回 Contract Diff、完整反向依赖影响闭包、逆序 suspension order 和 Effect 风险。
+5. 由测试 Binding 实际完成 registration disposer 与 Effect inverse，取得证据后调用 `harness_execute_plugin_replacement`；确认每个旧 registration/Effect 恰好需要一条 disposition，Harness 未执行保存的操作字符串。
+6. 制造 baseline mismatch 或 shared active owner；确认 disposal attempt 持久化为 conflict、旧 revision 保持 current、candidate 未部分激活；使用新的正确证据可以重试。
+7. 兼容替换成功时确认 current revision 原子切换、旧 revision 标为 replaced、consumer 保持 active；移除契约时确认依赖闭包进入 `pending_dependency`。
+8. 制造 candidate activation failure；有已处置可逆状态时 Plugin 进入 `needs_recovery`，调用 `harness_recover_plugin_replacement` 后旧 revision 恢复；compensation 或 irreversible residual 不得被报告为 rollback。
+9. 使用 `harness_dispose_plugin` 卸载 provider；确认 consumer 暂停。Binding 重载后用 `harness_reactivate_plugin` 提交证据，确认 provider 与 consumer 重新激活。
+10. 重启 Claude 后查询 Plugin Detail 与 Replacement Detail；确认 immutable revisions、依赖边、composition transitions、registration/Effect dispositions、activation/recovery evidence 均保留。
+
+额外验证：重复 Plugin revision 内容不同、registration 无 disposer、缺 disposition、无证据、不可逆 Effect 自动 inverse、跨 revision ID 混用均被拒绝，且核心 schema/API 不包含 Cordis 专属类型。
+
+## 11. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 11. 当前不作为验收失败的范围
+## 12. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

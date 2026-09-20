@@ -23,8 +23,8 @@ describe("Claude plugin contract", () => {
     }
   });
 
-  it("ships five discoverable, narrowly triggered Skills", async () => {
-    const expected = ["branch-execution", "drift-handling", "task-tree-planning", "taskroot", "verification-reporting"];
+  it("ships six discoverable, narrowly triggered Skills", async () => {
+    const expected = ["branch-execution", "drift-handling", "plugin-composition", "task-tree-planning", "taskroot", "verification-reporting"];
     expect((await readdir(path.join(root, "skills"))).sort()).toEqual(expected);
     for (const name of expected) {
       const source = await readFile(path.join(root, "skills", name, "SKILL.md"), "utf8");

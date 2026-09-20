@@ -12,6 +12,7 @@ import { WorkflowService } from "./workflow-service.js";
 import { FailureCaseService } from "./failure-case-service.js";
 import { EvolutionService } from "./evolution-service.js";
 import { ReplacementService } from "./replacement-service.js";
+import { PluginCompositionService } from "./plugin-composition-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -20,6 +21,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const failures = new FailureCaseService(database);
   const evolution = new EvolutionService(database);
   const replacements = new ReplacementService(database);
+  const plugins = new PluginCompositionService(database);
   return {
     database,
     projects,
@@ -30,6 +32,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     failures,
     evolution,
     replacements,
+    plugins,
     drifts,
     actions: new RuntimeActionService(database, drifts),
     queries: new RuntimeQueryService(database),

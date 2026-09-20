@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal，以及 Project Identity & Clone 九个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone，以及 Plugin Composition Contract 十个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -28,8 +28,10 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Task Node Replacement 通过不可变候选、契约差异、依赖影响闭包、逆序挂起、证据化 Effect 处置、原子激活和失败恢复推进；
 - 目录复制会创建独立 Project，重写 Task Tree、Artifact 与 Contract 引用，保留 Clone provenance，但不会把源 Trace、Attempt 或 Evaluation 冒充为目标执行事实；
 - Clone 后运行时暂停在重新验证阶段；源项目和目标项目使用不同 marker 与 `project_id`，可独立继续演进；
+- Runtime Plugin 使用稳定 ID 和不可变 revision，通过精确 provides/requires contract、固定点依赖协调与 composition state 实现空间组合；
+- Plugin registration 和 Effect 由 revision 生命周期拥有；替换/卸载只接受证据化 disposition，并支持影响闭包、冲突重试、失败恢复和 provider 恢复后的依赖重激活；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 47 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 57 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -98,6 +100,20 @@ Project Runtime Records 统一存放在公共数据库中，项目目录只保�
 - `harness project clones [incoming|outgoing|all]`、`harness project clone-detail CLONE_ID`、`harness_get_project_clones` 和 `harness_get_project_clone_detail` 用于审计来源、实体 ID 映射与继承证据。
 
 Clone 继承 Task Tree、不可变修订、Artifact Graph、Contract 和确认投影；目标 Artifact 回到 planned，运行中节点暂停，成功节点重新验证。源 Trace、Attempt 与 Evaluation 不会复制到目标项目，历史 Evaluation 只以明确的 `inherited_from_clone` provenance 保存。
+
+### Plugin Composition Contract
+
+Plugin Composition 是 Harness 数据目录级的运行时能力注册表，不随单个 Project Clone。它描述 Skill、Workflow、Hook、Binding 和 Runtime extension 如何组合，但不替代 Claude Code 的插件安装器，也不会动态导入或执行不可信代码。
+
+- `harness_register_plugin_revision`：注册稳定 Plugin ID 下的首个不可变 revision；
+- `harness_get_plugins`、`harness_get_plugin_detail`：查看 current revision、composition state、缺失契约、registration、Effect、依赖边和状态转换；
+- `harness_reconcile_plugins`：按精确 `contractId@version` 反复协调到固定点；provider 缺失时 consumer 进入 `pending_dependency`，恢复后自动重激活；
+- `harness_preview_plugin_replacement`：保存 candidate，展示 contract diff、反向依赖影响闭包、逆序挂起顺序和 Effect 风险，不改变 current revision；
+- `harness_execute_plugin_replacement`：校验每个旧 registration/Effect 的 disposition 与证据，成功后原子切换 revision；冲突时保留旧 revision 供重试；
+- `harness_recover_plugin_replacement`、`harness_get_plugin_replacement_detail`：恢复可逆的失败激活并审计全部处置尝试；
+- `harness_dispose_plugin`、`harness_reactivate_plugin`：证据化卸载/重载，并向依赖者传播 provider 消失与恢复。
+
+manifest 中的 disposer、inverse 和 compensation 字符串只是 Binding 声明。Harness 永远不会把它们当成 shell、JavaScript、MCP 或回调直接执行。`plugin-composition` Skill 指导 Agent 先由目标 Binding 真正完成动作、取得证据，再提交 Runtime 状态。
 
 ### Artifact Graph 与 Plan Drift
 

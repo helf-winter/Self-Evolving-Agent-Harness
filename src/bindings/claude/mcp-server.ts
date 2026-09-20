@@ -5,6 +5,7 @@ import { openRuntime } from "../../application/runtime.js";
 import { HarnessError } from "../../domain/errors.js";
 import type { TaskNodeInput, TaskTreeDocument } from "../../domain/task-tree.js";
 import type { FailureReproductionContract, ReproductionValidationObservation } from "../../domain/failure-case.js";
+import type { PluginRevisionManifest } from "../../domain/plugin-composition.js";
 
 function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -48,6 +49,31 @@ const reproductionObservationSchema = z.object({
   repeatStabilityVerdict: z.enum(["pass", "fail", "not_run"]),
   isolationVerdict: z.enum(["pass", "fail", "not_run"]),
   evidenceRefs: z.array(z.string().min(1)).min(1),
+});
+const pluginContractSchema = z.object({ contractId: z.string().min(1), version: z.string().min(1) });
+const pluginManifestSchema = z.object({
+  revision: z.string().min(1),
+  provides: z.array(pluginContractSchema), requires: z.array(pluginContractSchema),
+  registrations: z.array(z.object({
+    key: z.string().min(1), kind: z.enum(["skill", "workflow", "hook", "binding", "runtime_extension"]),
+    targetRef: z.string().min(1), disposerKind: z.enum(["unregister_callback", "restart_required", "manual"]),
+    disposerRef: z.string().min(1),
+  })),
+  effects: z.array(z.object({
+    key: z.string().min(1), effectType: z.enum(["reversible", "version_reversible", "compensatable", "irreversible"]),
+    targetRef: z.string().min(1), operation: z.string().min(1), baselineRef: z.string().nullable(),
+    inverseOperation: z.string().nullable(), compensationOperation: z.string().nullable(),
+    evidenceRefs: z.array(z.string().min(1)).min(1),
+  })),
+  metadata: z.record(z.string(), z.unknown()),
+});
+const pluginRegistrationDispositionSchema = z.object({
+  registrationId: z.string().min(1), action: z.enum(["disposed", "retain"]),
+  evidenceRefs: z.array(z.string().min(1)).min(1), residualImpact: z.string(),
+});
+const pluginEffectDispositionSchema = z.object({
+  effectId: z.string().min(1), action: z.enum(["inverse_applied", "compensation_applied", "retain"]),
+  observedBaselineRef: z.string().nullable(), evidenceRefs: z.array(z.string().min(1)).min(1), residualImpact: z.string(),
 });
 
 export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
@@ -101,6 +127,81 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
       ...(evidenceLimit ? { evidenceLimit } : {}), ...(evidenceCursor ? { evidenceCursor } : {}),
     },
   )));
+
+  server.registerTool("harness_register_plugin_revision", {
+    description: "Register one immutable, framework-neutral Runtime Plugin revision and deterministically reconcile its dependencies; no code is loaded or executed.",
+    inputSchema: { pluginId: z.string().min(1), manifest: pluginManifestSchema },
+  }, ({ pluginId, manifest }) => guarded(() => runtime.plugins.registerRevision({
+    pluginId, manifest: manifest as PluginRevisionManifest,
+  })));
+
+  server.registerTool("harness_reconcile_plugins", {
+    description: "Recompute exact Plugin provides/requires bindings to a fixed point and persist lifecycle transitions.",
+    inputSchema: {},
+  }, () => guarded(() => runtime.plugins.reconcile()));
+
+  server.registerTool("harness_get_plugins", {
+    description: "List installation-scoped Runtime Plugins and their composition state.",
+    inputSchema: {
+      state: z.enum(["pending_dependency", "active", "suspending", "replacing", "needs_recovery", "disposed"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ state, limit, cursor }) => guarded(() => runtime.plugins.listPlugins({
+    ...(state ? { state } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+  })));
+
+  server.registerTool("harness_get_plugin_detail", {
+    description: "Get immutable Plugin revisions, registrations, Effects, dependency edges, and composition transitions.",
+    inputSchema: { pluginId: z.string().min(1) },
+  }, ({ pluginId }) => guarded(() => runtime.plugins.getPluginDetail(pluginId)));
+
+  server.registerTool("harness_preview_plugin_replacement", {
+    description: "Persist a candidate Plugin revision and preview contract diff, dependency impact, suspension order, and Effect risk without activation.",
+    inputSchema: { pluginId: z.string().min(1), manifest: pluginManifestSchema },
+  }, ({ pluginId, manifest }) => guarded(() => runtime.plugins.previewReplacement({
+    pluginId, manifest: manifest as PluginRevisionManifest,
+  })));
+
+  server.registerTool("harness_execute_plugin_replacement", {
+    description: "Validate evidence-backed registration/Effect dispositions and atomically activate a Plugin candidate or preserve recoverable failure state.",
+    inputSchema: {
+      replacementId: z.string().min(1), registrationDispositions: z.array(pluginRegistrationDispositionSchema),
+      effectDispositions: z.array(pluginEffectDispositionSchema), activationVerdict: z.enum(["succeeded", "failed"]),
+      activationEvidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ replacementId, registrationDispositions, effectDispositions, activationVerdict, activationEvidenceRefs }) => guarded(() => runtime.plugins.executeReplacement({
+    replacementId, registrationDispositions, effectDispositions, activationVerdict, activationEvidenceRefs,
+  })));
+
+  server.registerTool("harness_recover_plugin_replacement", {
+    description: "Record evidence-backed restoration of an old Plugin revision after failed candidate activation.",
+    inputSchema: {
+      replacementId: z.string().min(1), recoveryVerdict: z.enum(["restored", "failed"]),
+      evidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ replacementId, recoveryVerdict, evidenceRefs }) => guarded(() => runtime.plugins.recoverReplacement({
+    replacementId, recoveryVerdict, evidenceRefs,
+  })));
+
+  server.registerTool("harness_get_plugin_replacement_detail", {
+    description: "Get one Plugin replacement with contract impact and every registration/Effect disposal attempt.",
+    inputSchema: { replacementId: z.string().min(1) },
+  }, ({ replacementId }) => guarded(() => runtime.plugins.getReplacementDetail(replacementId)));
+
+  server.registerTool("harness_dispose_plugin", {
+    description: "Dispose one active Runtime Plugin revision after evidence-backed registration and Effect disposition; stored operations are never executed.",
+    inputSchema: {
+      pluginId: z.string().min(1), registrationDispositions: z.array(pluginRegistrationDispositionSchema),
+      effectDispositions: z.array(pluginEffectDispositionSchema),
+    },
+  }, ({ pluginId, registrationDispositions, effectDispositions }) => guarded(() => runtime.plugins.disposePlugin({
+    pluginId, registrationDispositions, effectDispositions,
+  })));
+
+  server.registerTool("harness_reactivate_plugin", {
+    description: "Reactivate a disposed Plugin revision after the Binding supplies reload evidence, then reconcile dependents.",
+    inputSchema: { pluginId: z.string().min(1), evidenceRefs: z.array(z.string().min(1)).min(1) },
+  }, ({ pluginId, evidenceRefs }) => guarded(() => runtime.plugins.reactivatePlugin({ pluginId, evidenceRefs })));
 
   server.registerTool("harness_get_runtime_snapshot", {
     description: "Get compact Harness runtime state for the current project.", inputSchema: { cwd: cwdSchema },
