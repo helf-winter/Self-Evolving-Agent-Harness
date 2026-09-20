@@ -67,17 +67,28 @@ harness node evaluate ATTEMPT_ID succeeded --json
 - 失败后可以创建新 Attempt，`failed -> failed -> succeeded` 的全部历史在重启后仍能通过 Task Node Detail 查询；
 - Skeleton Gate 只能引用状态为 `succeeded` 的 Skeleton Attempt。
 
-## 5. 安全检查
+## 5. Artifact Graph 与 Plan Drift
+
+在 Claude 插件会话中完成一棵包含 `artifactLinks` 的 Task Tree 规划并确认分支，然后通过 Runtime Tools 验收：
+
+1. 调用 `harness_get_artifact_graph`，确认返回当前 revision 的 Artifact、Task Link、Relation 和 Contract，且分页结果不包含其他 Project 的 ID。
+2. 在活跃 Attempt 中修改当前节点已规划的文件；调用 `harness_get_artifact_detail`，确认状态更新为 `modified`，并能追溯到来源 Trace Event，且不会产生 unexpected Artifact Drift。
+3. 在活跃 Attempt 中修改未规划文件；调用 `harness_get_plan_drift_summary`，确认产生 `warning` Drift，并与一个 `plan_drift` Trace Event 配对。
+4. 修改仅由另一个尚未确认分支规划的文件；确认产生 `blocking` Drift，当前节点与 Attempt 进入 `blocked`，resolution 为 `pending_user_confirmation`。
+5. 对上述 blocked Attempt 提出 `succeeded` Evaluation；确认结果被记录为 `uncertain`，transition 的 rejection code 为 `blocking_drift`，节点不会变为成功。
+6. 重启 Claude 后再次查询 Artifact Detail 和 Plan Drift Summary；确认状态、来源和 Drift 记录仍存在。
+
+## 6. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-## 6. 当前不作为验收失败的范围
+## 7. 当前不作为验收失败的范围
 
 - Evolution 自动结论与经验晋升；
 - 失败案例 L0-L4 自动化；
-- Task Node Replacement、Drift 检测与 Effect Disposal；
+- blocking Drift Resolution、User Change Request、Task Node Replacement 与 Effect Disposal；
 - 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
