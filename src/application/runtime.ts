@@ -6,6 +6,7 @@ import { NodeExecutionService } from "./node-execution-service.js";
 import { PlanDriftService } from "./plan-drift-service.js";
 import { ProjectIdentityService, resolveDataHome } from "./project-identity-service.js";
 import { RuntimeQueryService } from "./runtime-query-service.js";
+import { RuntimeActionService } from "./runtime-action-service.js";
 import { TaskTreeService } from "./task-tree-service.js";
 import { WorkflowService } from "./workflow-service.js";
 
@@ -21,6 +22,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     executions: new NodeExecutionService(database),
     evaluations: new EvaluationService(database),
     drifts,
+    actions: new RuntimeActionService(database, drifts),
     queries: new RuntimeQueryService(database),
     hooks: new HookIngestionService(database, projects, drifts),
     close: () => database.close(),

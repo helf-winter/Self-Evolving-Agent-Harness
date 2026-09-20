@@ -11,6 +11,7 @@ export type PlanDriftType =
   | "relation_changed";
 export type PlanDriftSeverity = "info" | "warning" | "blocking";
 export type PlanDriftResolutionStatus = "pending_user_confirmation" | "accepted" | "rejected" | "branch_cancelled" | "recorded";
+export type PlanDriftResolutionDecision = "accepted" | "rejected" | "branch_cancelled";
 
 export interface RecordPlanDriftInput {
   projectId: string;
@@ -121,6 +122,30 @@ export class PlanDriftService {
       description: input.description.trim(), explanation: input.explanation.trim(), recommendation,
       resolutionStatus, createdAt,
     };
+  }
+
+  resolveDriftWithinTransaction(input: {
+    projectId: string;
+    driftId: string;
+    decision: PlanDriftResolutionDecision;
+  }): { treeId: string; nodeId: string; decision: PlanDriftResolutionDecision } {
+    const drift = this.database.get<{ tree_id: string; task_node_id: string | null; severity: string; resolution_status: string }>(
+      "SELECT tree_id, task_node_id, severity, resolution_status FROM plan_drift_records WHERE id = ? AND project_id = ?",
+      input.driftId, input.projectId,
+    );
+    if (!drift) throw new HarnessError("not_found", "Plan Drift was not found in this Project");
+    if (drift.severity !== "blocking" || drift.resolution_status !== "pending_user_confirmation" || !drift.task_node_id) {
+      throw new HarnessError("confirmation_not_applicable", "only a pending blocking Plan Drift can be resolved");
+    }
+    this.database.run(
+      "UPDATE plan_drift_records SET resolution_status = ?, user_decision = ? WHERE id = ?",
+      input.decision, input.decision, input.driftId,
+    );
+    const nodeStatus = input.decision === "accepted"
+      ? "needs_revalidation"
+      : input.decision === "rejected" ? "ready" : "cancelled";
+    this.database.run("UPDATE task_nodes SET status = ? WHERE id = ? AND tree_id = ?", nodeStatus, drift.task_node_id, drift.tree_id);
+    return { treeId: drift.tree_id, nodeId: drift.task_node_id, decision: input.decision };
   }
 
   private validate(input: RecordPlanDriftInput): void {
