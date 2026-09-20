@@ -153,7 +153,7 @@ export function analyzePlanReadiness(document: TaskTreeDocument, scopeRootNodeId
       summary: "Repair invalid draft structure at " + error.path, affectedRefs: [error.path],
     }));
     const context = document.planningContext;
-    if (!context?.goal.trim() || !context.scopeBoundaries.length || !context.exclusions) {
+    if (!context?.goal.trim() || !context.scopeBoundaries.length || !context.exclusions.length) {
       blockingIssues.push(issue({
         code: "planning_context_incomplete", category: "root_scope", severity: "blocking",
         summary: "Clarify the root goal, scope boundaries, and explicit exclusions", affectedRefs: ["planningContext"],

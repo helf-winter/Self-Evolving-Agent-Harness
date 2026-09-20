@@ -15,6 +15,7 @@ export type HarnessErrorCode =
   | "evidence_scope_mismatch"
   | "evaluation_not_applicable"
   | "runtime_action_rejected"
+  | "confirmation_required"
   | "confirmation_not_applicable"
   | "failure_case_invalid"
   | "reproduction_validation_rejected"

@@ -4,6 +4,7 @@ import { normalizeArtifactInput } from "../domain/artifact-graph.js";
 import { newId, nowIso } from "../domain/ids.js";
 import { canonicalJson } from "../domain/trace.js";
 import { validateTaskTree, type TaskTreeDocument } from "../domain/task-tree.js";
+import { analyzeDraftImpact, analyzePlanReadiness, validateDraftStructure } from "../domain/task-refinement.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 
 interface TreeRow {
@@ -18,6 +19,25 @@ interface RevisionRow {
   id: string;
   revision: number;
   document_json: string;
+  created_at: string;
+}
+
+export interface RefinementDecisionInput {
+  discussionTopic: string;
+  currentUnderstanding: string;
+  consideredOptions: string[];
+  agentRecommendation: string;
+  userDecision: string;
+}
+
+interface RefinementChangeSetInput {
+  projectId: string;
+  treeId: string;
+  baseRevisionId: string;
+  operations: Array<{ op: "replace_document"; document: TaskTreeDocument }>;
+  sourceUserMessageTraceEventId: string;
+  previewId?: string;
+  decision: RefinementDecisionInput;
 }
 
 export interface TaskTreeRevisionView {
@@ -124,23 +144,165 @@ export class TaskTreeService {
     return this.persistRevision(tree, input.projectId, document, false);
   }
 
+  previewDraftChangeSet(input: {
+    projectId: string;
+    treeId: string;
+    baseRevisionId: string;
+    proposedDocument: TaskTreeDocument;
+  }) {
+    const tree = this.requireTree(input.projectId, input.treeId);
+    if (tree.current_revision_id !== input.baseRevisionId) {
+      throw new HarnessError("revision_conflict", "the refinement preview has a stale base revision");
+    }
+    this.assertValidDocument(input.proposedDocument);
+    const base = this.requireRevision(input.baseRevisionId);
+    const impact = analyzeDraftImpact(JSON.parse(base.document_json) as TaskTreeDocument, input.proposedDocument);
+    if (!impact.hasStructuralChange) {
+      throw new HarnessError("invalid_input", "the proposed Task Tree does not contain a structural change");
+    }
+    const previewId = newId();
+    const timestamp = nowIso();
+    this.database.transaction(() => {
+      this.database.run(
+        "UPDATE draft_change_set_previews SET status = 'stale' WHERE project_id = ? AND tree_id = ? AND base_revision_id = ? AND status = 'active'",
+        input.projectId, input.treeId, input.baseRevisionId,
+      );
+      this.database.run(`
+        INSERT INTO draft_change_set_previews (
+          id, project_id, tree_id, base_revision_id, proposed_document_hash, proposed_document_json,
+          impact_json, apply_mode, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+      `, previewId, input.projectId, input.treeId, input.baseRevisionId, impact.proposedDocumentHash,
+      canonicalJson(input.proposedDocument), canonicalJson(impact),
+      impact.applyMode === "preview_required" ? "preview_required" : "direct", timestamp);
+    });
+    return { previewId, baseRevisionId: input.baseRevisionId, ...impact };
+  }
+
+  applyRefinementChangeSet(input: RefinementChangeSetInput): TaskTreeRevisionView {
+    return this.database.transaction(() => {
+      const tree = this.requireTree(input.projectId, input.treeId);
+      if (tree.current_revision_id !== input.baseRevisionId) {
+        throw new HarnessError("revision_conflict", "the refinement Change Set has a stale base revision");
+      }
+      if (input.operations.length !== 1 || input.operations[0]?.op !== "replace_document") {
+        throw new HarnessError("invalid_input", "one replace_document operation is required");
+      }
+      const decision = input.decision;
+      if (!decision.discussionTopic.trim() || !decision.currentUnderstanding.trim()
+        || !decision.consideredOptions.length || decision.consideredOptions.some((option) => !option.trim())
+        || !decision.agentRecommendation.trim() || !decision.userDecision.trim()) {
+        throw new HarnessError("invalid_input", "a complete refinement Decision Record is required");
+      }
+      const document = input.operations[0].document;
+      this.assertValidDocument(document);
+      const base = this.requireRevision(input.baseRevisionId);
+      const impact = analyzeDraftImpact(JSON.parse(base.document_json) as TaskTreeDocument, document);
+      if (!impact.hasStructuralChange) {
+        throw new HarnessError("invalid_input", "the refinement Change Set does not contain a structural change");
+      }
+      const sourceTrace = this.database.get<{ id: string; occurred_at: string }>(`
+        SELECT id, occurred_at FROM trace_events
+        WHERE id = ? AND project_id = ? AND tree_id = ? AND event_name = 'UserPromptSubmit'
+      `, input.sourceUserMessageTraceEventId, input.projectId, input.treeId);
+      if (!sourceTrace || sourceTrace.occurred_at < base.created_at) {
+        throw new HarnessError("evidence_scope_mismatch", "the source user message must belong to this tree and follow the base revision");
+      }
+
+      let previewId: string | null = null;
+      if (impact.applyMode === "preview_required" || input.previewId) {
+        const preview = input.previewId ? this.database.get<{
+          id: string; proposed_document_hash: string; status: string; apply_mode: string;
+        }>(`
+          SELECT id, proposed_document_hash, status, apply_mode FROM draft_change_set_previews
+          WHERE id = ? AND project_id = ? AND tree_id = ? AND base_revision_id = ?
+        `, input.previewId, input.projectId, input.treeId, input.baseRevisionId) : undefined;
+        if (!preview || preview.status !== "active" || preview.proposed_document_hash !== impact.proposedDocumentHash
+          || (impact.applyMode === "preview_required" && preview.apply_mode !== "preview_required")) {
+          throw new HarnessError("confirmation_required", "a current matching impact preview is required before this cross-branch refinement can be applied", impact);
+        }
+        previewId = preview.id;
+      }
+
+      const timestamp = nowIso();
+      const changeSetId = newId();
+      const decisionId = newId();
+      const planningTraceId = newId();
+      const affectedRefs = {
+        nodeIds: impact.affectedNodeIds,
+        branchIds: impact.affectedBranchIds,
+        artifactIds: impact.affectedArtifactIds,
+        relationRefs: impact.affectedRelationRefs,
+        contractIds: impact.affectedContractIds,
+      };
+      this.database.run(`
+        INSERT INTO trace_events (
+          id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key
+        ) VALUES (?, ?, ?, 'runtime:planning', 'PlanningDecisionApplied', ?, ?, ?)
+      `, planningTraceId, input.projectId, input.treeId, canonicalJson({
+        changeSetId, baseRevisionId: input.baseRevisionId, sourceUserMessageTraceEventId: input.sourceUserMessageTraceEventId,
+        discussionTopic: decision.discussionTopic, userDecision: decision.userDecision, impact: affectedRefs,
+      }), timestamp, `planning-change-set:${changeSetId}`);
+      this.database.run(`
+        INSERT INTO draft_change_sets (
+          id, tree_id, base_revision_id, operations_json, affected_references_json, decision_summary, created_at,
+          project_id, source_message_trace_event_id, affected_node_ids_json, affected_branch_ids_json,
+          affected_artifact_ids_json, affected_relation_refs_json, affected_contract_ids_json,
+          apply_mode, preview_id, planning_trace_event_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, changeSetId, input.treeId, input.baseRevisionId, canonicalJson(input.operations), canonicalJson(affectedRefs),
+      decision.userDecision, timestamp, input.projectId, input.sourceUserMessageTraceEventId,
+      canonicalJson(impact.affectedNodeIds), canonicalJson(impact.affectedBranchIds), canonicalJson(impact.affectedArtifactIds),
+      canonicalJson(impact.affectedRelationRefs), canonicalJson(impact.affectedContractIds),
+      impact.applyMode === "preview_required" ? "preview_required" : "direct", previewId, planningTraceId);
+
+      const result = this.persistRevision(tree, input.projectId, document, false);
+      this.database.run(`
+        INSERT INTO planning_decisions (
+          id, tree_id, kind, decision_json, trace_event_id, created_at, base_revision_id, result_revision_id,
+          change_set_id, discussion_topic, current_understanding, considered_options_json,
+          agent_recommendation, user_decision, affected_refs_json, source_message_trace_event_id
+        ) VALUES (?, ?, 'task_tree_refinement', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, decisionId, input.treeId, canonicalJson(decision), planningTraceId, timestamp,
+      input.baseRevisionId, result.revisionId, changeSetId, decision.discussionTopic, decision.currentUnderstanding,
+      canonicalJson(decision.consideredOptions), decision.agentRecommendation, decision.userDecision,
+      canonicalJson(affectedRefs), input.sourceUserMessageTraceEventId);
+      this.database.run(
+        "UPDATE draft_change_sets SET result_revision_id = ?, planning_decision_id = ? WHERE id = ?",
+        result.revisionId, decisionId, changeSetId,
+      );
+      if (previewId) this.database.run(
+        "UPDATE draft_change_set_previews SET status = 'applied', applied_at = ? WHERE id = ?",
+        timestamp, previewId,
+      );
+      return result;
+    });
+  }
+
   scanPlanReadiness(input: { projectId: string; treeId: string; scopeRootNodeId?: string }) {
     const tree = this.requireTree(input.projectId, input.treeId);
     const revision = this.requireRevision(tree.current_revision_id);
     const document = JSON.parse(revision.document_json) as TaskTreeDocument;
     const coveredNodeIds = resolveConfirmationScope(document, input.scopeRootNodeId);
     if (!coveredNodeIds) throw new HarnessError("not_found", "confirmation scope root was not found in the current Task Tree revision");
-    const validation = validateTaskTree(document);
+    const readiness = analyzePlanReadiness(document, input.scopeRootNodeId);
     const scopeKind = input.scopeRootNodeId ? "branch" as const : "tree" as const;
     const result = {
-      resultId: newId(), treeId: tree.id, revisionId: revision.id, ready: validation.ok, blockers: validation.errors,
+      resultId: newId(), treeId: tree.id, revisionId: revision.id, ready: readiness.ready,
+      blockers: readiness.blockingIssues, blockingIssues: readiness.blockingIssues,
+      warnings: readiness.warnings, recommendedNextIssue: readiness.recommendedNextIssue,
       scopeKind, scopeRootNodeId: input.scopeRootNodeId ?? null, coveredNodeIds,
     };
     this.database.transaction(() => {
       const timestamp = nowIso();
       this.database.run(
-        "INSERT INTO plan_readiness_results (id, tree_id, revision_id, ready, blockers_json, created_at, scope_kind, scope_root_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        result.resultId, tree.id, revision.id, result.ready ? 1 : 0, canonicalJson(result.blockers), timestamp, scopeKind, input.scopeRootNodeId ?? null,
+        `INSERT INTO plan_readiness_results (
+          id, tree_id, revision_id, ready, blockers_json, created_at, scope_kind, scope_root_node_id,
+          issues_json, warnings_json, recommended_issue_json, priority_policy_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'refinement-priority-v1')`,
+        result.resultId, tree.id, revision.id, result.ready ? 1 : 0, canonicalJson(result.blockers), timestamp,
+        scopeKind, input.scopeRootNodeId ?? null, canonicalJson(result.blockingIssues), canonicalJson(result.warnings),
+        result.recommendedNextIssue ? canonicalJson(result.recommendedNextIssue) : null,
       );
       if (result.ready) {
         this.database.run(
@@ -299,6 +461,15 @@ export class TaskTreeService {
         "INSERT INTO task_relation_edges (id, tree_revision_id, from_node_id, to_node_id, kind, artifact_id) VALUES (?, ?, ?, ?, ?, ?)",
         newId(), revisionId, relation.fromNodeId, relation.toNodeId, relation.kind, relation.artifactId ?? null,
       ));
+      for (const criterion of document.skeletonCriteria ?? []) {
+        this.database.run(`
+          INSERT INTO skeleton_acceptance_criteria (
+            id, tree_revision_id, criterion, satisfied, evidence_trace_id,
+            branch_task_node_id, criteria_json, source_planning_revision_id
+          ) VALUES (?, ?, ?, 0, NULL, ?, ?, ?)
+        `, newId(), revisionId, criterion.readinessConditions.join("; "), criterion.branchNodeId,
+        canonicalJson(criterion), revisionId);
+      }
       this.database.run("UPDATE task_trees SET current_revision_id = ?, updated_at = ? WHERE id = ?", revisionId, timestamp, tree.id);
       this.database.run(
         "UPDATE workflow_states SET stage = 'task_tree_refinement', revision = revision + 1, updated_at = ? WHERE project_id = ? AND tree_id = ? AND active = 1 AND stage IN ('draft_task_tree', 'branch_confirmation')",
@@ -310,6 +481,11 @@ export class TaskTreeService {
   }
 
   private assertValidDocument(document: TaskTreeDocument): void {
+    if (document.planningVersion === 1) {
+      const errors = validateDraftStructure(document);
+      if (!errors.length) return;
+      throw new HarnessError("invalid_tree_structure", "Task Tree draft failed deterministic structural validation", errors);
+    }
     const validation = validateTaskTree(document);
     if (validation.ok) return;
     const code = validation.errors.some((error) => error.code === "relation_artifact_required")
@@ -329,7 +505,7 @@ export class TaskTreeService {
   }
 
   private requireRevision(revisionId: string): RevisionRow {
-    const revision = this.database.get<RevisionRow>("SELECT id, revision, document_json FROM task_tree_revisions WHERE id = ?", revisionId);
+    const revision = this.database.get<RevisionRow>("SELECT id, revision, document_json, created_at FROM task_tree_revisions WHERE id = ?", revisionId);
     if (!revision) throw new HarnessError("not_found", "Task Tree revision was not found");
     return revision;
   }

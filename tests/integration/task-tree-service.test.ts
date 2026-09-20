@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TaskTreeService } from "../../src/application/task-tree-service.js";
+import type { TaskTreeDocument } from "../../src/domain/task-tree.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
 
 const dirs: string[] = [];
@@ -37,6 +38,22 @@ const branchedDocument = {
   ],
   relations: [],
   artifacts: [],
+};
+const planningDocument: TaskTreeDocument = {
+  ...branchedDocument,
+  planningVersion: 1,
+  planningContext: {
+    goal: "Build the runtime",
+    scopeBoundaries: ["Task planning"],
+    exclusions: ["No UI"],
+    unresolvedQuestions: [],
+    unresolvedDecisions: [],
+    plannedEffects: [],
+  },
+  skeletonCriteria: [
+    { id: "skeleton-a", branchNodeId: "branch-a", expectedArtifacts: ["a.ts"], requiredContracts: ["a-contract"], verificationCommands: ["npm test -- a"], readinessConditions: ["A compiles"] },
+    { id: "skeleton-b", branchNodeId: "branch-b", expectedArtifacts: ["b.ts"], requiredContracts: ["b-contract"], verificationCommands: ["npm test -- b"], readinessConditions: ["B compiles"] },
+  ],
 };
 async function fixture() {
   const directory = await mkdtemp(path.join(tmpdir(), "harness-tree-"));
@@ -198,5 +215,94 @@ describe("TaskTreeService", () => {
     )).toEqual(expect.objectContaining({ contract_name: "Runtime API" }));
     expect(reopened.get<{ kind: string }>("SELECT kind FROM artifact_graph_relations WHERE tree_revision_id = ?", revision.revisionId)).toEqual({ kind: "calls" });
     reopened.close();
+  });
+
+  it("stores an incomplete planning draft and reports deterministic scoped readiness details", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const incomplete: TaskTreeDocument = {
+      ...planningDocument,
+      nodes: planningDocument.nodes.map((node) => node.id === "branch-a" ? { ...node, acceptanceCriteria: [] } : node),
+    };
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: incomplete });
+    const branch = service.scanPlanReadiness({ projectId: "p1", treeId: root.treeId, scopeRootNodeId: "branch-a" });
+    expect(branch).toMatchObject({ revisionId: draft.revisionId, ready: false, scopeKind: "branch" });
+    expect(branch.blockingIssues).toEqual(expect.arrayContaining([expect.objectContaining({ code: "leaf_contract_incomplete" })]));
+    expect(branch.recommendedNextIssue).toMatchObject({ code: "leaf_contract_incomplete" });
+    expect(database.get<{ issues_json: string; recommended_issue_json: string }>(
+      "SELECT issues_json, recommended_issue_json FROM plan_readiness_results WHERE id = ?", branch.resultId,
+    )).toMatchObject({ issues_json: expect.stringContaining("leaf_contract_incomplete"), recommended_issue_json: expect.stringContaining("leaf_contract_incomplete") });
+    database.close();
+  });
+
+  it("atomically applies a local refinement with source prompt, Decision Record, planning Trace, and skeleton projections", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: planningDocument });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('prompt-1', 'p1', ?, 'session-1', 'UserPromptSubmit', '{}', '2099-01-01T00:00:00.000Z', 'prompt-1')", root.treeId);
+    const proposed: TaskTreeDocument = {
+      ...planningDocument,
+      nodes: planningDocument.nodes.map((node) => node.id === "branch-a" ? { ...node, title: "Branch A refined" } : node),
+    };
+    const applied = service.applyRefinementChangeSet({
+      projectId: "p1", treeId: root.treeId, baseRevisionId: draft.revisionId,
+      operations: [{ op: "replace_document", document: proposed }], sourceUserMessageTraceEventId: "prompt-1",
+      decision: {
+        discussionTopic: "Clarify branch A", currentUnderstanding: "A owns its local module",
+        consideredOptions: ["Keep", "Refine"], agentRecommendation: "Refine", userDecision: "Refine",
+      },
+    });
+    expect(applied.revision).toBe(3);
+    const changeSet = database.get<{ result_revision_id: string; apply_mode: string; source_message_trace_event_id: string; planning_decision_id: string; planning_trace_event_id: string }>(
+      "SELECT result_revision_id, apply_mode, source_message_trace_event_id, planning_decision_id, planning_trace_event_id FROM draft_change_sets ORDER BY created_at DESC LIMIT 1",
+    );
+    expect(changeSet).toMatchObject({ result_revision_id: applied.revisionId, apply_mode: "direct", source_message_trace_event_id: "prompt-1" });
+    expect(changeSet?.planning_decision_id).toBeTruthy();
+    expect(changeSet?.planning_trace_event_id).toBeTruthy();
+    expect(database.get<{ event_name: string }>("SELECT event_name FROM trace_events WHERE id = ?", changeSet!.planning_trace_event_id)).toEqual({ event_name: "PlanningDecisionApplied" });
+    expect(database.all("SELECT id FROM skeleton_acceptance_criteria WHERE tree_revision_id = ?", applied.revisionId)).toHaveLength(2);
+    database.close();
+  });
+
+  it("requires a matching preview for cross-branch refinement and consumes it once", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: planningDocument });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('prompt-2', 'p1', ?, 'session-1', 'UserPromptSubmit', '{}', '2099-01-01T00:00:00.000Z', 'prompt-2')", root.treeId);
+    const proposed: TaskTreeDocument = {
+      ...planningDocument,
+      planningContext: { ...planningDocument.planningContext!, goal: "Build and publish the runtime" },
+    };
+    const input = {
+      projectId: "p1", treeId: root.treeId, baseRevisionId: draft.revisionId,
+      operations: [{ op: "replace_document" as const, document: proposed }], sourceUserMessageTraceEventId: "prompt-2",
+      decision: { discussionTopic: "Expand root goal", currentUnderstanding: "Publishing changes all branches", consideredOptions: ["Build only", "Build and publish"], agentRecommendation: "Build and publish", userDecision: "Build and publish" },
+    };
+    expect(() => service.applyRefinementChangeSet(input)).toThrow(expect.objectContaining({ code: "confirmation_required" }));
+    expect(database.all("SELECT id FROM task_tree_revisions WHERE tree_id = ?", root.treeId)).toHaveLength(2);
+    const preview = service.previewDraftChangeSet({ projectId: "p1", treeId: root.treeId, baseRevisionId: draft.revisionId, proposedDocument: proposed });
+    expect(preview).toMatchObject({ applyMode: "preview_required", impactLevel: "cross_branch" });
+    const applied = service.applyRefinementChangeSet({ ...input, previewId: preview.previewId });
+    expect(applied.revision).toBe(3);
+    expect(database.get<{ status: string; applied_at: string }>("SELECT status, applied_at FROM draft_change_set_previews WHERE id = ?", preview.previewId))
+      .toMatchObject({ status: "applied", applied_at: expect.any(String) });
+    expect(() => service.applyRefinementChangeSet({ ...input, previewId: preview.previewId }))
+      .toThrow(expect.objectContaining({ code: "revision_conflict" }));
+    database.close();
+  });
+
+  it("rejects no-op refinement without creating a revision", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId, document: planningDocument });
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('prompt-3', 'p1', ?, 'session-1', 'UserPromptSubmit', '{}', '2099-01-01T00:00:00.000Z', 'prompt-3')", root.treeId);
+    expect(() => service.applyRefinementChangeSet({
+      projectId: "p1", treeId: root.treeId, baseRevisionId: draft.revisionId,
+      operations: [{ op: "replace_document", document: planningDocument }], sourceUserMessageTraceEventId: "prompt-3",
+      decision: { discussionTopic: "No change", currentUnderstanding: "No change", consideredOptions: ["Keep"], agentRecommendation: "Keep", userDecision: "Keep" },
+    })).toThrow(expect.objectContaining({ code: "invalid_input" }));
+    expect(database.all("SELECT id FROM task_tree_revisions WHERE tree_id = ?", root.treeId)).toHaveLength(2);
+    expect(database.all("SELECT id FROM draft_change_sets WHERE tree_id = ?", root.treeId)).toHaveLength(0);
+    database.close();
   });
 });
