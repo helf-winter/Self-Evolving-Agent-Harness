@@ -179,14 +179,33 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 额外验证：重复 Plugin revision 内容不同、registration 无 disposer、缺 disposition、无证据、不可逆 Effect 自动 inverse、跨 revision ID 混用均被拒绝，且核心 schema/API 不包含 Cordis 专属类型。
 
-## 11. 安全检查
+## 11. Task Tree Refinement Loop
+
+在 Claude 插件会话中创建一棵至少包含两个顶层分支的 `planningVersion: 1` Task Tree：
+
+1. 保存一个 Leaf Contract 或 Skeleton Acceptance Criteria 尚未完整的结构合法草案；确认产生 immutable revision，而 `harness_scan_plan_readiness` 返回 blocking issue 和确定性的 `recommendedNextIssue`。
+2. 仅扫描其中一个完整分支；确认另一个兄弟分支自身的问题不会阻塞该分支 readiness。
+3. 修改一个分支并调用 `harness_apply_draft_change_set`；确认 Runtime 从文档差异派生影响范围，绑定对应 `UserPromptSubmit` Trace，并原子写入 Decision Record、planning Trace 与新 revision。
+4. 修改根级 planning context 或两个分支；未调用 `harness_preview_draft_change_set` 时 apply 必须返回 `confirmation_required`，持久化匹配 preview 后才能成功。
+5. 用旧 base revision、其他 Project 的 Trace、早于 base revision 的 Trace、已消费 preview 或不同文档 hash 重试；确认不会产生部分 Change Set、Decision 或 revision。
+6. 提交与当前文档完全相同的结果；确认不产生新 revision。
+7. 调用 `harness_get_task_refinement_history` 和 `harness_get_planning_decision_detail`；确认能恢复用户可见选项、Agent 建议、用户决定、影响范围、base/result revision、preview 与 Trace 引用，不包含隐藏思维链。
+8. 重启 Claude 后重复查询，并确认结构化 Skeleton Acceptance Criteria 和 readiness 结果仍存在。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/unit/task-refinement.test.ts tests/integration/task-tree-service.test.ts tests/e2e/task-tree-refinement.test.ts tests/plugin/mcp.test.ts
+```
+
+## 12. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 12. 当前不作为验收失败的范围
+## 13. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
