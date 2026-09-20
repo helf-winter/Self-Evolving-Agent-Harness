@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(11);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(12);
     reopened.close();
   });
 
@@ -326,6 +326,17 @@ describe("RuntimeDatabase", () => {
     database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('r1', 't1', 1, '{}', 'now')");
     database.run("INSERT INTO draft_change_set_previews (id, project_id, tree_id, base_revision_id, proposed_document_hash, proposed_document_json, impact_json, apply_mode, status, created_at) VALUES ('preview1', 'p1', 't1', 'r1', 'hash', '{}', '{}', 'preview_required', 'active', 'now')");
     expect(() => database.run("UPDATE draft_change_set_previews SET status = 'unknown' WHERE id = 'preview1'")).toThrow();
+    database.close();
+  });
+
+  it("adds immutable Execution Context metadata to Trace Events with a legacy-safe default", async () => {
+    const database = new RuntimeDatabase(await databasePath());
+    expect(database.all<{ name: string }>("PRAGMA table_info(trace_events)").map((column) => column.name))
+      .toContain("execution_context_json");
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO trace_events (id, project_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('e1', 'p1', 'run-1', 'UserPromptSubmit', '{}', 'now', 'e1')");
+    expect(database.get<{ execution_context_json: string }>("SELECT execution_context_json FROM trace_events WHERE id = 'e1'"))
+      .toEqual({ execution_context_json: "{}" });
     database.close();
   });
 });

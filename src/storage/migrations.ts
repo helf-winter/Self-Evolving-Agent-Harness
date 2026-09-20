@@ -974,4 +974,11 @@ export const migrations: Migration[] = [{
     CREATE INDEX skeleton_acceptance_branch_idx
       ON skeleton_acceptance_criteria(tree_revision_id, branch_task_node_id);
   `,
+}, {
+  version: 12,
+  sql: `
+    ALTER TABLE trace_events ADD COLUMN execution_context_json TEXT NOT NULL DEFAULT '{}';
+    CREATE INDEX trace_project_run_time_idx
+      ON trace_events(project_id, session_id, occurred_at DESC, id DESC);
+  `,
 }];

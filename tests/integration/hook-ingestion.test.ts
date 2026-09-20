@@ -68,6 +68,30 @@ describe("Claude hook ingestion", () => {
     expect(() => mapClaudeHook({ hook_event_name: "PostToolUse" })).toThrow(expect.objectContaining({ code: "invalid_input" }));
   });
 
+  it("maps bounded Claude runtime context fields without retaining transcript paths or unknown environment data", () => {
+    const event = mapClaudeHook({
+      hook_event_name: "SessionStart", session_id: "run-1", cwd: "/work/a", source: "resume",
+      model: "glm-5.3", prompt_id: "prompt-1", permission_mode: "default", effort: { level: "high" },
+      agent_id: "agent-1", agent_type: "reviewer", transcript_path: "/secret/transcript.jsonl",
+      apiKey: "must-not-survive",
+    });
+    expect(event.runtimeContext).toEqual({
+      promptId: "prompt-1", permissionMode: "default", effortLevel: "high", agentId: "agent-1",
+      agentType: "reviewer", modelId: "glm-5.3", launchMethod: "resume",
+    });
+    expect(event).not.toHaveProperty("transcriptPath");
+
+    expect(mapClaudeHook({
+      hook_event_name: "PostModelSwitch", session_id: "run-1", cwd: "/work/a",
+      from_model: "glm-5.3", to_model: "kimi-k3", source: "command",
+    }).runtimeContext).toMatchObject({ modelId: "kimi-k3", modelSwitchSource: "command", previousModelId: "glm-5.3" });
+
+    expect(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit", session_id: "run-1", cwd: "/work/a",
+      permission_mode: "unknown", effort: { level: "extreme" },
+    }).runtimeContext).toEqual({});
+  });
+
   it("does not create project state for ordinary conversation without an active workflow", async () => {
     const { directory, database, service } = await fixture();
     const result = await service.ingest(mapClaudeHook({ hook_event_name: "UserPromptSubmit", session_id: "s1", cwd: directory, prompt: "explain this" }));
