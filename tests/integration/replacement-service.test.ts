@@ -13,16 +13,33 @@ async function fixture() {
   const database = new RuntimeDatabase(path.join(directory, "runtime.db"));
   database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/p1', '2000', '2000')");
   database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p2', '/p2', '2000', '2000')");
+  const provider = { id: "n1", parentId: null, title: "Provider", children: ["n2"] };
+  const consumer = {
+    id: "n2", parentId: "n1", title: "Consumer", children: [], objectives: ["Consume API"],
+    expectedOutputs: ["src/consumer.ts"], acceptanceCriteria: ["consumer passes"], unresolvedQuestions: [],
+    unresolvedDecisions: [], dependencies: ["n1"], requiredEvidence: [{ key: "test", description: "consumer test" }],
+    executionPhase: "implementation", stopDecompositionReason: "one consumer",
+  };
+  const document = {
+    nodes: [provider, consumer], relations: [{ fromNodeId: "n2", toNodeId: "n1", kind: "depends_on" }],
+    artifacts: [{ id: "contract-artifact", kind: "contract", locator: "api.contract", status: "planned", metadata: {}, granularity: "contract", artifactType: "interface", pathOrName: "api.contract", identityStrategy: "logical_contract_id", confidence: "planned" }],
+    artifactContracts: [{ id: "api-contract", artifactId: "contract-artifact", name: "API", version: "1", compatibilityPolicy: "exact", schemaOrSignature: "GET /api", providerNodeIds: ["n1"], consumerNodeIds: ["n2"], validationRefs: ["npm test"] }],
+  };
   database.run("INSERT INTO task_trees (id, project_id, title, status, current_revision_id, created_at, updated_at) VALUES ('t1', 'p1', 'Tree', 'confirmed', 'tr1', '2000', '2000')");
-  database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('tr1', 't1', 1, '{}', '2000')");
+  database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('tr1', 't1', 1, ?, '2000')", JSON.stringify(document));
   database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES ('n1', 't1', NULL, 'Provider', 'succeeded')");
   database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES ('n2', 't1', 'n1', 'Consumer', 'succeeded')");
-  database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr1', 'n1', 'tr1', '{}', '2000')");
-  database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr2', 'n2', 'tr1', '{}', '2000')");
+  database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr1', 'n1', 'tr1', ?, '2000')", JSON.stringify(provider));
+  database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr2', 'n2', 'tr1', ?, '2000')", JSON.stringify(consumer));
   database.run("INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at, current_hash_or_version) VALUES ('file1', 'p1', 't1', 'file', 'src/api.ts', 'modified', '{}', '2000', '2000', 'hash:current')");
+  database.run("INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at, granularity, artifact_type, identity_strategy, confidence) VALUES ('contract-artifact', 'p1', 't1', 'contract', 'api.contract', 'planned', '{}', '2000', '2000', 'contract', 'interface', 'logical_contract_id', 'planned')");
+  database.run("INSERT INTO artifact_contracts (id, contract_id, project_id, tree_id, tree_revision_id, artifact_id, contract_name, contract_version, compatibility_policy, schema_or_signature, provider_revision_ids_json, consumer_revision_ids_json, validation_refs_json, created_at) VALUES ('contract-row', 'api-contract', 'p1', 't1', 'tr1', 'contract-artifact', 'API', '1', 'exact', 'GET /api', '[\"nr1\"]', '[\"nr2\"]', '[\"npm test\"]', '2000')");
+  database.run("INSERT INTO task_relation_edges (id, tree_revision_id, from_node_id, to_node_id, kind, artifact_id) VALUES ('relation1', 'tr1', 'n2', 'n1', 'depends_on', NULL)");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('trace-n1', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2030', 'trace-n1')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('trace-n2', 'p1', 't1', 'n2', 's', 'PostToolUse', '{}', '2030', 'trace-n2')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('foreign', 'p2', NULL, NULL, 's', 'PostToolUse', '{}', '2030', 'foreign')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('request', 'p1', 't1', 'n1', 's', 'UserPromptSubmit', '{}', '2031', 'request')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('answer', 'p1', 't1', 'n1', 's', 'UserPromptSubmit', '{}', '2032', 'answer')");
   return { database, service: new ReplacementService(database) };
 }
 
@@ -74,6 +91,57 @@ describe("ReplacementService Effect Registry", () => {
     expect(service.getEffectDisposalCapability({ projectId: "p1", effectId: second.effectId }).baselineMatches).toBe(false);
     expect(() => service.getEffectDisposalCapability({ projectId: "p2", effectId: first.effectId }))
       .toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
+
+  it("previews an immutable candidate and suspends the reverse dependency closure only after confirmation", async () => {
+    const { database, service } = await fixture();
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at) VALUES ('consumer-run', 'p1', 't1', 'n2', 'nr2', 1, 'running', '2030')");
+    const preview = service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "tr1",
+      candidateBody: { id: "n1", parentId: null, title: "Provider v2", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [],
+      reason: "Replace provider implementation", sourceMessageTraceEventId: "request",
+    });
+    expect(preview).toMatchObject({
+      status: "pending_confirmation", affectedTaskNodeIds: ["n1", "n2"],
+      suspensionOrder: ["n2", "n1"], contractDiff: { compatibility: "compatible" },
+    });
+    expect(database.get<{ current_revision_id: string }>("SELECT current_revision_id FROM task_trees WHERE id = 't1'"))
+      .toEqual({ current_revision_id: "tr1" });
+    expect(database.all("SELECT id FROM task_node_candidate_revisions")).toHaveLength(1);
+    expect(database.all("SELECT id FROM task_node_composition_transitions")).toHaveLength(0);
+
+    const confirmed = service.confirmTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId, answer: "yes", answerTraceEventId: "answer",
+    });
+    expect(confirmed).toMatchObject({ status: "suspending", suspendedNodeIds: ["n2", "n1"] });
+    expect(database.get<{ status: string }>("SELECT status FROM execution_attempts WHERE id = 'consumer-run'"))
+      .toEqual({ status: "blocked" });
+    expect(database.all<{ composition_state: string }>("SELECT composition_state FROM task_node_composition_states ORDER BY task_node_id"))
+      .toEqual([{ composition_state: "suspending" }, { composition_state: "suspending" }]);
+    expect(database.all("SELECT id FROM task_node_composition_transitions WHERE replacement_id = ?", preview.replacementId)).toHaveLength(2);
+    database.close();
+  });
+
+  it("rejects stale previews and leaves state untouched when replacement is declined", async () => {
+    const { database, service } = await fixture();
+    expect(() => service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "stale",
+      candidateBody: { id: "n1", parentId: null, title: "Provider v2", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [],
+      reason: "Replace provider", sourceMessageTraceEventId: "request",
+    })).toThrow(expect.objectContaining({ code: "revision_conflict" }));
+    const preview = service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "tr1",
+      candidateBody: { id: "n1", parentId: null, title: "Provider v2", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [],
+      reason: "Replace provider", sourceMessageTraceEventId: "request",
+    });
+    expect(service.confirmTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId, answer: "no", answerTraceEventId: "answer",
+    })).toMatchObject({ status: "rolled_back", suspendedNodeIds: [] });
+    expect(database.all("SELECT id FROM task_node_composition_transitions")).toHaveLength(0);
     database.close();
   });
 });

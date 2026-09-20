@@ -647,6 +647,7 @@ export const migrations: Migration[] = [{
       suspension_order_json TEXT NOT NULL,
       contract_diff_json TEXT NOT NULL,
       effect_risk_summary_json TEXT NOT NULL,
+      prior_execution_statuses_json TEXT NOT NULL DEFAULT '{}',
       user_confirmation_ref TEXT REFERENCES runtime_confirmation_prompts(id) ON DELETE SET NULL,
       runtime_action_id TEXT UNIQUE REFERENCES runtime_actions(id) ON DELETE SET NULL,
       status TEXT NOT NULL CHECK(status IN (

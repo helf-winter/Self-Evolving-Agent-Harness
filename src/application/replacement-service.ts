@@ -1,5 +1,7 @@
 import { HarnessError } from "../domain/errors.js";
 import {
+  compareContractBindings,
+  computeDependencyImpactClosure,
   disposalCapability,
   validateEffectDefinition,
   type EffectDisposalCapability,
@@ -7,6 +9,7 @@ import {
   type TaskNodeEffectType,
 } from "../domain/composition.js";
 import { newId, nowIso } from "../domain/ids.js";
+import { validateTaskTree, type TaskNodeInput, type TaskTreeDocument } from "../domain/task-tree.js";
 import { canonicalJson } from "../domain/trace.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 
@@ -137,6 +140,265 @@ export class ReplacementService {
       capability: disposalCapability(effect.effect_type), baselineMatches,
       hasSharedActiveOwner: sharedCount > 0,
     };
+  }
+
+  previewTaskNodeReplacement(input: {
+    projectId: string;
+    treeId: string;
+    nodeId: string;
+    expectedTreeRevisionId: string;
+    candidateBody: TaskNodeInput;
+    providesContractIds: string[];
+    requiresContractIds: string[];
+    reason: string;
+    sourceMessageTraceEventId: string;
+  }) {
+    const tree = this.database.get<{ current_revision_id: string; document_json: string }>(`
+      SELECT t.current_revision_id, tr.document_json FROM task_trees t
+      JOIN task_tree_revisions tr ON tr.id = t.current_revision_id
+      WHERE t.id = ? AND t.project_id = ?
+    `, input.treeId, input.projectId);
+    if (!tree) throw new HarnessError("not_found", "Task Tree was not found in this Project");
+    if (tree.current_revision_id !== input.expectedTreeRevisionId) {
+      throw new HarnessError("revision_conflict", "Replacement preview was based on a stale Task Tree revision");
+    }
+    if (this.database.get(`SELECT id FROM task_node_replacement_records
+      WHERE project_id = ? AND task_node_id = ? AND status IN ('pending_confirmation','suspending','disposing','activating')`,
+    input.projectId, input.nodeId)) {
+      throw new HarnessError("replacement_invalid", "Task Node already has an active Replacement");
+    }
+    const oldRevision = this.database.get<{ id: string; body_json: string; created_at: string }>(`
+      SELECT nr.id, nr.body_json, nr.created_at FROM task_node_revisions nr
+      JOIN task_nodes n ON n.id = nr.node_id
+      WHERE nr.node_id = ? AND nr.tree_revision_id = ? AND n.tree_id = ?
+    `, input.nodeId, tree.current_revision_id, input.treeId);
+    if (!oldRevision) throw new HarnessError("not_found", "active Task Node revision was not found");
+    const oldBody = JSON.parse(oldRevision.body_json) as TaskNodeInput;
+    if (input.candidateBody.id !== oldBody.id || input.candidateBody.parentId !== oldBody.parentId
+      || canonicalJson(input.candidateBody.children) !== canonicalJson(oldBody.children)) {
+      throw new HarnessError("replacement_invalid", "Replacement must preserve Task Node identity and tree topology");
+    }
+    const document = JSON.parse(tree.document_json) as TaskTreeDocument;
+    const candidateDocument: TaskTreeDocument = {
+      ...document,
+      nodes: document.nodes.map((node) => node.id === input.nodeId ? input.candidateBody : node),
+    };
+    const validation = validateTaskTree(candidateDocument);
+    if (!validation.ok) throw new HarnessError("replacement_invalid", "candidate Task Node produces an invalid Task Tree", validation.errors);
+    const source = this.database.get<{ occurred_at: string }>(`
+      SELECT occurred_at FROM trace_events WHERE id = ? AND project_id = ? AND tree_id = ?
+        AND event_name = 'UserPromptSubmit' AND (node_id = ? OR node_id IS NULL)
+    `, input.sourceMessageTraceEventId, input.projectId, input.treeId, input.nodeId);
+    if (!source) throw new HarnessError("evidence_scope_mismatch", "Replacement reason must reference a same-Project user message Trace");
+    const contractRows = this.database.all<{
+      contract_id: string; provider_revision_ids_json: string; consumer_revision_ids_json: string;
+    }>(`SELECT contract_id, provider_revision_ids_json, consumer_revision_ids_json FROM artifact_contracts
+        WHERE project_id = ? AND tree_id = ? AND tree_revision_id = ?`,
+    input.projectId, input.treeId, tree.current_revision_id);
+    const knownContracts = new Set(contractRows.map((row) => row.contract_id));
+    const provides = [...new Set(input.providesContractIds)].sort();
+    const requires = [...new Set(input.requiresContractIds)].sort();
+    if ([...provides, ...requires].some((contractId) => !knownContracts.has(contractId))) {
+      throw new HarnessError("replacement_invalid", "candidate references an Artifact Contract outside the current Task Tree revision");
+    }
+    const oldBinding = this.database.get<{ provides_contract_ids_json: string; requires_contract_ids_json: string }>(
+      "SELECT provides_contract_ids_json, requires_contract_ids_json FROM task_node_revision_contract_bindings WHERE task_node_revision_id = ?",
+      oldRevision.id,
+    );
+    const oldProvides = oldBinding
+      ? JSON.parse(oldBinding.provides_contract_ids_json) as string[]
+      : contractRows.filter((row) => (JSON.parse(row.provider_revision_ids_json) as string[]).includes(oldRevision.id)).map((row) => row.contract_id);
+    const oldRequires = oldBinding
+      ? JSON.parse(oldBinding.requires_contract_ids_json) as string[]
+      : contractRows.filter((row) => (JSON.parse(row.consumer_revision_ids_json) as string[]).includes(oldRevision.id)).map((row) => row.contract_id);
+    const revisionNodes = new Map(this.database.all<{ id: string; node_id: string }>(`
+      SELECT nr.id, nr.node_id FROM task_node_revisions nr WHERE nr.tree_revision_id = ?
+    `, tree.current_revision_id).map((row) => [row.id, row.node_id]));
+    const availableProviderContracts = contractRows.flatMap((row) =>
+      (JSON.parse(row.provider_revision_ids_json) as string[]).some((revisionId) => revisionNodes.get(revisionId) !== input.nodeId)
+        ? [row.contract_id] : []);
+    const contractDiff = compareContractBindings({
+      oldProvides, oldRequires, candidateProvides: provides, candidateRequires: requires, availableProviderContracts,
+    });
+    const relations = this.database.all<{ from_node_id: string; to_node_id: string }>(
+      "SELECT from_node_id, to_node_id FROM task_relation_edges WHERE tree_revision_id = ?",
+      tree.current_revision_id,
+    ).map((row) => ({ fromNodeId: row.from_node_id, toNodeId: row.to_node_id }));
+    const contractConsumers = contractRows.flatMap((row) => {
+      const providers = (JSON.parse(row.provider_revision_ids_json) as string[]).map((revisionId) => revisionNodes.get(revisionId)).filter((value): value is string => Boolean(value));
+      const consumers = (JSON.parse(row.consumer_revision_ids_json) as string[]).map((revisionId) => revisionNodes.get(revisionId)).filter((value): value is string => Boolean(value));
+      return providers.flatMap((providerNodeId) => consumers.map((consumerNodeId) => ({ providerNodeId, consumerNodeId })));
+    });
+    const impact = computeDependencyImpactClosure({ replacedNodeId: input.nodeId, relations, contractConsumers });
+    const effects = this.database.all<{ id: string; effect_type: TaskNodeEffectType; target_ref: string }>(`
+      SELECT id, effect_type, target_ref FROM task_node_effects
+      WHERE project_id = ? AND owner_revision_id = ? AND disposal_status = 'active' ORDER BY id
+    `, input.projectId, oldRevision.id);
+    const effectRiskSummary = {
+      total: effects.length,
+      byType: Object.fromEntries(["reversible", "version_reversible", "compensatable", "irreversible"].map((type) => [
+        type, effects.filter((effect) => effect.effect_type === type).length,
+      ])),
+      effects: effects.map((effect) => ({ effectId: effect.id, effectType: effect.effect_type, targetRef: effect.target_ref, capability: disposalCapability(effect.effect_type) })),
+    };
+    const candidateRevisionId = newId();
+    const replacementId = newId();
+    const actionId = newId();
+    const confirmationId = newId();
+    const createdAt = nowIso();
+    const riskLevel = effects.some((effect) => effect.effect_type === "irreversible") ? "irreversible" : "high";
+    this.database.transaction(() => {
+      this.database.run(`INSERT INTO task_node_candidate_revisions (
+        id, project_id, tree_id, task_node_id, base_tree_revision_id, base_node_revision_id,
+        body_json, provides_contract_ids_json, requires_contract_ids_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, candidateRevisionId, input.projectId, input.treeId,
+      input.nodeId, tree.current_revision_id, oldRevision.id, canonicalJson(input.candidateBody),
+      canonicalJson(provides), canonicalJson(requires), createdAt);
+      this.database.run(`INSERT INTO runtime_actions (
+        id, project_id, kind, input_json, result_json, created_at, action_type, target_type,
+        target_id, expected_revision, reason, source_message_ref, risk_level,
+        confirmation_requirement, confirmation_prompt_id, status
+      ) VALUES (?, ?, 'replace_task_node', ?, '{}', ?, 'replace_task_node', 'replacement', ?, ?, ?, ?, ?, 'required', ?, 'pending_confirmation')`,
+      actionId, input.projectId, canonicalJson({ candidateRevisionId, contractDiff, impact, effectRiskSummary }),
+      createdAt, replacementId, tree.current_revision_id, input.reason.trim(), input.sourceMessageTraceEventId,
+      riskLevel, confirmationId);
+      this.database.run(`INSERT INTO runtime_confirmation_prompts (
+        id, project_id, tree_id, scope_id, prompt, status, created_at, tree_revision_id,
+        scope_kind, scope_root_node_id, prompt_type, related_task_node_id,
+        related_artifact_ids_json, options_json, runtime_action_id
+      ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 'branch', ?, 'high_risk_action', ?, ?, ?, ?)`,
+      confirmationId, input.projectId, input.treeId, replacementId,
+      `Replace ${oldBody.title} and suspend ${impact.affectedTaskNodeIds.length} affected Task Nodes?`,
+      createdAt, tree.current_revision_id, input.nodeId, input.nodeId,
+      canonicalJson(effects.flatMap((effect) => this.artifactId(effect.target_ref) ?? [])),
+      canonicalJson(["yes", "no", "pause"]), actionId);
+      this.database.run(`INSERT INTO task_node_replacement_records (
+        id, project_id, tree_id, task_node_id, old_revision_id, candidate_revision_id,
+        expected_tree_revision_id, affected_task_node_ids_json, suspension_order_json,
+        contract_diff_json, effect_risk_summary_json, user_confirmation_ref, runtime_action_id,
+        status, disposal_result_refs_json, trace_event_ids_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_confirmation', '[]', ?, ?)`,
+      replacementId, input.projectId, input.treeId, input.nodeId, oldRevision.id, candidateRevisionId,
+      tree.current_revision_id, canonicalJson(impact.affectedTaskNodeIds), canonicalJson(impact.suspensionOrder),
+      canonicalJson(contractDiff), canonicalJson(effectRiskSummary), confirmationId, actionId,
+      canonicalJson([input.sourceMessageTraceEventId]), createdAt);
+      for (const affectedNodeId of impact.affectedTaskNodeIds) this.ensureCompositionState(
+        input.projectId, input.treeId, affectedNodeId, tree.current_revision_id, "active", null, createdAt,
+      );
+      this.setRuntimeWaiting(input.projectId, input.treeId, input.nodeId, confirmationId);
+    });
+    return {
+      replacementId, candidateRevisionId, confirmationId, actionId,
+      status: "pending_confirmation" as const, affectedTaskNodeIds: impact.affectedTaskNodeIds,
+      suspensionOrder: impact.suspensionOrder, contractDiff, effectRiskSummary,
+    };
+  }
+
+  confirmTaskNodeReplacement(input: {
+    projectId: string;
+    replacementId: string;
+    answer: "yes" | "no" | "pause";
+    answerTraceEventId: string;
+  }) {
+    const record = this.database.get<{
+      id: string; tree_id: string; task_node_id: string; expected_tree_revision_id: string;
+      affected_task_node_ids_json: string; suspension_order_json: string; user_confirmation_ref: string;
+      runtime_action_id: string; status: string; created_at: string; prompt_created_at: string; prompt_status: string;
+    }>(`SELECT r.id, r.tree_id, r.task_node_id, r.expected_tree_revision_id,
+               r.affected_task_node_ids_json, r.suspension_order_json, r.user_confirmation_ref,
+               r.runtime_action_id, r.status, r.created_at, p.created_at AS prompt_created_at, p.status AS prompt_status
+        FROM task_node_replacement_records r
+        JOIN runtime_confirmation_prompts p ON p.id = r.user_confirmation_ref
+        WHERE r.id = ? AND r.project_id = ?`, input.replacementId, input.projectId);
+    if (!record) throw new HarnessError("not_found", "Task Node Replacement was not found in this Project");
+    if (record.status !== "pending_confirmation" || record.prompt_status !== "pending") {
+      throw new HarnessError("confirmation_not_applicable", "Replacement confirmation is no longer pending");
+    }
+    const answerTrace = this.database.get<{ occurred_at: string }>(`
+      SELECT occurred_at FROM trace_events WHERE id = ? AND project_id = ? AND tree_id = ?
+        AND event_name = 'UserPromptSubmit' AND occurred_at >= ?
+    `, input.answerTraceEventId, input.projectId, record.tree_id, record.prompt_created_at);
+    if (!answerTrace) throw new HarnessError("evidence_scope_mismatch", "Replacement answer Trace is outside the pending prompt scope or lifetime");
+    if (input.answer === "pause") {
+      this.database.run("UPDATE runtime_actions SET result_json = ? WHERE id = ?", canonicalJson({ paused: true }), record.runtime_action_id);
+      return { replacementId: record.id, status: "pending_confirmation" as const, suspendedNodeIds: [], paused: true };
+    }
+    const tree = this.database.get<{ current_revision_id: string }>(
+      "SELECT current_revision_id FROM task_trees WHERE id = ? AND project_id = ?", record.tree_id, input.projectId,
+    );
+    if (!tree || tree.current_revision_id !== record.expected_tree_revision_id) {
+      throw new HarnessError("revision_conflict", "Task Tree changed while Replacement confirmation was pending");
+    }
+    const resolvedAt = nowIso();
+    if (input.answer === "no") {
+      this.database.transaction(() => {
+        this.database.run("UPDATE runtime_confirmation_prompts SET status = 'rejected', answer = 'no', answer_trace_event_id = ?, resolved_at = ? WHERE id = ?", input.answerTraceEventId, resolvedAt, record.user_confirmation_ref);
+        this.database.run("UPDATE runtime_actions SET status = 'rejected', result_json = ?, committed_at = ? WHERE id = ?", canonicalJson({ rejected: true }), resolvedAt, record.runtime_action_id);
+        this.database.run("UPDATE task_node_replacement_records SET status = 'rolled_back', recovery_result_json = ?, trace_event_ids_json = ?, completed_at = ? WHERE id = ?", canonicalJson({ reason: "user_rejected_before_suspension" }), canonicalJson([input.answerTraceEventId]), resolvedAt, record.id);
+        this.clearRuntimeWaiting(input.projectId, record.user_confirmation_ref);
+      });
+      return { replacementId: record.id, status: "rolled_back" as const, suspendedNodeIds: [] };
+    }
+    const suspensionOrder = JSON.parse(record.suspension_order_json) as string[];
+    this.database.transaction(() => {
+      const priorStatuses: Record<string, string> = {};
+      for (const nodeId of suspensionOrder) {
+        const node = this.database.get<{ status: string; revision_id: string }>(`
+          SELECT n.status, nr.id AS revision_id FROM task_nodes n
+          JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = ?
+          WHERE n.id = ? AND n.tree_id = ?
+        `, tree.current_revision_id, nodeId, record.tree_id);
+        if (!node) throw new HarnessError("replacement_invalid", "affected Task Node disappeared before suspension");
+        priorStatuses[nodeId] = node.status;
+        const priorComposition = this.database.get<{ composition_state: string }>(
+          "SELECT composition_state FROM task_node_composition_states WHERE task_node_id = ?", nodeId,
+        )?.composition_state ?? "active";
+        this.database.run(`UPDATE task_node_composition_states SET active_revision_id = ?, composition_state = 'suspending', replacement_id = ?, updated_at = ? WHERE task_node_id = ?`,
+          node.revision_id, record.id, resolvedAt, nodeId);
+        this.database.run(`INSERT INTO task_node_composition_transitions (
+          id, project_id, tree_id, task_node_id, task_node_revision_id, from_state, to_state,
+          reason, replacement_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'suspending', 'replacement impact closure', ?, ?)`,
+        newId(), input.projectId, record.tree_id, nodeId, node.revision_id, priorComposition, record.id, resolvedAt);
+        this.database.run("UPDATE task_nodes SET status = 'blocked' WHERE id = ?", nodeId);
+        this.database.run("UPDATE execution_attempts SET status = 'blocked', completed_at = ? WHERE task_node_id = ? AND status IN ('running','verifying')", resolvedAt, nodeId);
+      }
+      this.database.run("UPDATE runtime_confirmation_prompts SET status = 'accepted', answer = 'yes', answer_trace_event_id = ?, resolved_at = ? WHERE id = ?", input.answerTraceEventId, resolvedAt, record.user_confirmation_ref);
+      this.database.run("UPDATE runtime_actions SET status = 'validated', result_json = ? WHERE id = ?", canonicalJson({ confirmed: true, suspendedNodeIds: suspensionOrder }), record.runtime_action_id);
+      this.database.run("UPDATE task_node_replacement_records SET status = 'suspending', prior_execution_statuses_json = ?, trace_event_ids_json = ? WHERE id = ?", canonicalJson(priorStatuses), canonicalJson([input.answerTraceEventId]), record.id);
+      this.clearRuntimeWaiting(input.projectId, record.user_confirmation_ref);
+    });
+    return { replacementId: record.id, status: "suspending" as const, suspendedNodeIds: suspensionOrder };
+  }
+
+  private ensureCompositionState(projectId: string, treeId: string, nodeId: string, treeRevisionId: string, state: "active", replacementId: string | null, at: string): void {
+    const revision = this.database.get<{ id: string }>(
+      "SELECT id FROM task_node_revisions WHERE node_id = ? AND tree_revision_id = ?", nodeId, treeRevisionId,
+    );
+    if (!revision) throw new HarnessError("replacement_invalid", "affected Task Node revision was not found");
+    this.database.run(`INSERT INTO task_node_composition_states (
+      task_node_id, project_id, tree_id, active_revision_id, composition_state, replacement_id, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_node_id) DO NOTHING`,
+    nodeId, projectId, treeId, revision.id, state, replacementId, at);
+  }
+
+  private setRuntimeWaiting(projectId: string, treeId: string, nodeId: string, confirmationId: string): void {
+    const existing = this.database.get<{ state_json: string }>("SELECT state_json FROM runtime_states WHERE project_id = ?", projectId);
+    const state = existing ? JSON.parse(existing.state_json) as Record<string, unknown> : {};
+    const next = { ...state, state: "waiting_for_replacement_confirmation", waitingItemType: "high_risk_action", waitingItemId: confirmationId };
+    this.database.run(`INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET selected_tree_id = excluded.selected_tree_id,
+      selected_node_id = excluded.selected_node_id, state_json = excluded.state_json, updated_at = excluded.updated_at`,
+    projectId, treeId, nodeId, canonicalJson(next), nowIso());
+  }
+
+  private clearRuntimeWaiting(projectId: string, confirmationId: string): void {
+    const existing = this.database.get<{ state_json: string }>("SELECT state_json FROM runtime_states WHERE project_id = ?", projectId);
+    if (!existing) return;
+    const state = JSON.parse(existing.state_json) as Record<string, unknown>;
+    if (state.waitingItemId !== confirmationId) return;
+    const next = { ...state, state: "active", waitingItemType: null, waitingItemId: null };
+    this.database.run("UPDATE runtime_states SET state_json = ?, updated_at = ? WHERE project_id = ?", canonicalJson(next), nowIso(), projectId);
   }
 
   private artifactId(targetRef: string): string | null {
