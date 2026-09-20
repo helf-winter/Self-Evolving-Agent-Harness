@@ -755,4 +755,164 @@ export const migrations: Migration[] = [{
     CREATE INDEX project_clone_evidence_target_idx
       ON project_clone_inherited_evidence(target_project_id, target_entity_id, created_at DESC);
   `,
+}, {
+  version: 10,
+  sql: `
+    CREATE TABLE runtime_plugins (
+      id TEXT PRIMARY KEY,
+      current_revision_id TEXT,
+      composition_state TEXT NOT NULL CHECK(composition_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_recovery', 'disposed'
+      )),
+      missing_requirements_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX runtime_plugin_state_idx ON runtime_plugins(composition_state, updated_at DESC);
+
+    CREATE TABLE runtime_plugin_revisions (
+      id TEXT PRIMARY KEY,
+      plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
+      revision TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('candidate', 'active', 'replaced', 'failed', 'disposed')),
+      created_at TEXT NOT NULL,
+      UNIQUE(plugin_id, revision)
+    );
+    CREATE INDEX runtime_plugin_revision_history_idx ON runtime_plugin_revisions(plugin_id, created_at DESC);
+
+    CREATE TABLE runtime_plugin_contracts (
+      plugin_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE CASCADE,
+      direction TEXT NOT NULL CHECK(direction IN ('provides', 'requires')),
+      contract_id TEXT NOT NULL,
+      contract_version TEXT NOT NULL,
+      PRIMARY KEY(plugin_revision_id, direction, contract_id, contract_version)
+    );
+    CREATE INDEX runtime_plugin_contract_lookup_idx
+      ON runtime_plugin_contracts(direction, contract_id, contract_version, plugin_revision_id);
+
+    CREATE TABLE runtime_plugin_registrations (
+      id TEXT PRIMARY KEY,
+      plugin_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE CASCADE,
+      registration_key TEXT NOT NULL,
+      registration_kind TEXT NOT NULL CHECK(registration_kind IN ('skill', 'workflow', 'hook', 'binding', 'runtime_extension')),
+      target_ref TEXT NOT NULL,
+      disposer_kind TEXT NOT NULL CHECK(disposer_kind IN ('unregister_callback', 'restart_required', 'manual')),
+      disposer_ref TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('declared', 'active', 'disposed', 'retained', 'conflict')),
+      created_at TEXT NOT NULL,
+      disposed_at TEXT,
+      UNIQUE(plugin_revision_id, registration_key)
+    );
+    CREATE INDEX runtime_plugin_registration_target_idx ON runtime_plugin_registrations(target_ref, status);
+
+    CREATE TABLE runtime_plugin_effects (
+      id TEXT PRIMARY KEY,
+      plugin_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE CASCADE,
+      effect_key TEXT NOT NULL,
+      effect_type TEXT NOT NULL CHECK(effect_type IN ('reversible', 'version_reversible', 'compensatable', 'irreversible')),
+      target_ref TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      baseline_ref TEXT,
+      inverse_operation TEXT,
+      compensation_operation TEXT,
+      evidence_refs_json TEXT NOT NULL,
+      disposal_status TEXT NOT NULL CHECK(disposal_status IN (
+        'active', 'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
+      )),
+      created_at TEXT NOT NULL,
+      disposed_at TEXT,
+      UNIQUE(plugin_revision_id, effect_key)
+    );
+    CREATE INDEX runtime_plugin_effect_target_idx ON runtime_plugin_effects(target_ref, disposal_status);
+
+    CREATE TABLE runtime_plugin_dependency_edges (
+      id TEXT PRIMARY KEY,
+      consumer_plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
+      consumer_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE CASCADE,
+      provider_plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
+      provider_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE CASCADE,
+      contract_id TEXT NOT NULL,
+      contract_version TEXT NOT NULL,
+      active INTEGER NOT NULL CHECK(active IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(consumer_revision_id, provider_revision_id, contract_id, contract_version)
+    );
+    CREATE INDEX runtime_plugin_dependency_consumer_idx
+      ON runtime_plugin_dependency_edges(consumer_plugin_id, consumer_revision_id, active);
+    CREATE INDEX runtime_plugin_dependency_provider_idx
+      ON runtime_plugin_dependency_edges(provider_plugin_id, provider_revision_id, active);
+
+    CREATE TABLE runtime_plugin_composition_transitions (
+      id TEXT PRIMARY KEY,
+      plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
+      plugin_revision_id TEXT REFERENCES runtime_plugin_revisions(id) ON DELETE SET NULL,
+      from_state TEXT CHECK(from_state IS NULL OR from_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_recovery', 'disposed'
+      )),
+      to_state TEXT NOT NULL CHECK(to_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_recovery', 'disposed'
+      )),
+      reason TEXT NOT NULL,
+      replacement_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX runtime_plugin_transition_history_idx
+      ON runtime_plugin_composition_transitions(plugin_id, created_at DESC);
+
+    CREATE TABLE runtime_plugin_replacement_records (
+      id TEXT PRIMARY KEY,
+      plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
+      old_revision_id TEXT NOT NULL REFERENCES runtime_plugin_revisions(id) ON DELETE RESTRICT,
+      candidate_revision_id TEXT NOT NULL UNIQUE REFERENCES runtime_plugin_revisions(id) ON DELETE RESTRICT,
+      contract_diff_json TEXT NOT NULL,
+      affected_plugin_ids_json TEXT NOT NULL,
+      suspension_order_json TEXT NOT NULL,
+      effect_risk_summary_json TEXT NOT NULL,
+      prior_plugin_states_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN (
+        'previewed', 'disposing', 'activating', 'completed', 'rolled_back', 'replacement_failed'
+      )),
+      disposal_result_refs_json TEXT NOT NULL,
+      activation_evidence_refs_json TEXT NOT NULL,
+      recovery_result_json TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX runtime_plugin_replacement_history_idx
+      ON runtime_plugin_replacement_records(plugin_id, created_at DESC);
+
+    CREATE TABLE runtime_plugin_registration_disposals (
+      id TEXT PRIMARY KEY,
+      replacement_id TEXT REFERENCES runtime_plugin_replacement_records(id) ON DELETE CASCADE,
+      plugin_registration_id TEXT NOT NULL REFERENCES runtime_plugin_registrations(id) ON DELETE RESTRICT,
+      disposition_action TEXT NOT NULL CHECK(disposition_action IN ('disposed', 'retain')),
+      disposal_status TEXT NOT NULL CHECK(disposal_status IN ('disposed', 'retained', 'manual_resolution')),
+      evidence_refs_json TEXT NOT NULL,
+      residual_impact TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX runtime_plugin_registration_disposal_idx
+      ON runtime_plugin_registration_disposals(plugin_registration_id, created_at DESC);
+
+    CREATE TABLE runtime_plugin_effect_disposals (
+      id TEXT PRIMARY KEY,
+      replacement_id TEXT REFERENCES runtime_plugin_replacement_records(id) ON DELETE CASCADE,
+      plugin_effect_id TEXT NOT NULL REFERENCES runtime_plugin_effects(id) ON DELETE RESTRICT,
+      disposition_action TEXT NOT NULL CHECK(disposition_action IN ('inverse_applied', 'compensation_applied', 'retain')),
+      disposal_capability TEXT NOT NULL CHECK(disposal_capability IN (
+        'auto_reversible', 'requires_baseline_check', 'compensation_only', 'manual_confirmation_required'
+      )),
+      disposal_status TEXT NOT NULL CHECK(disposal_status IN (
+        'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
+      )),
+      observed_baseline_ref TEXT,
+      evidence_refs_json TEXT NOT NULL,
+      residual_impact TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX runtime_plugin_effect_disposal_idx
+      ON runtime_plugin_effect_disposals(plugin_effect_id, created_at DESC);
+  `,
 }];

@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(9);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(10);
     reopened.close();
   });
 
@@ -265,6 +265,28 @@ describe("RuntimeDatabase", () => {
     expect(reopened.get<{ cloned_from_project_id: string; identity_token: string }>(
       "SELECT cloned_from_project_id, identity_token FROM projects WHERE id = 'p2'",
     )).toEqual({ cloned_from_project_id: "p1", identity_token: "token-2" });
+    reopened.close();
+  });
+
+  it("persists constrained global Plugin composition revisions, dependencies, Effects, and replacements", async () => {
+    const filename = await databasePath();
+    const database = new RuntimeDatabase(filename);
+    expect(database.all<{ name: string }>(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'runtime_plugin_%' ORDER BY name
+    `)).toHaveLength(10);
+    database.run("INSERT INTO runtime_plugins (id, composition_state, missing_requirements_json, created_at, updated_at) VALUES ('consumer', 'pending_dependency', '[\"trace@1\"]', 'now', 'now')");
+    database.run("INSERT INTO runtime_plugin_revisions (id, plugin_id, revision, manifest_json, status, created_at) VALUES ('consumer-r1', 'consumer', '1.0.0', '{}', 'candidate', 'now')");
+    database.run("INSERT INTO runtime_plugin_contracts (plugin_revision_id, direction, contract_id, contract_version) VALUES ('consumer-r1', 'requires', 'trace', '1')");
+    database.run("INSERT INTO runtime_plugin_registrations (id, plugin_revision_id, registration_key, registration_kind, target_ref, disposer_kind, disposer_ref, status, created_at) VALUES ('registration-1', 'consumer-r1', 'skill', 'skill', 'skill:consumer', 'unregister_callback', 'remove:consumer', 'declared', 'now')");
+    database.run("INSERT INTO runtime_plugin_effects (id, plugin_revision_id, effect_key, effect_type, target_ref, operation, baseline_ref, inverse_operation, compensation_operation, evidence_refs_json, disposal_status, created_at) VALUES ('effect-1', 'consumer-r1', 'skill-effect', 'reversible', 'skill:consumer', 'register', NULL, 'unregister', NULL, '[\"e1\"]', 'active', 'now')");
+    expect(() => database.run("INSERT INTO runtime_plugin_revisions (id, plugin_id, revision, manifest_json, status, created_at) VALUES ('consumer-r1-copy', 'consumer', '1.0.0', '{}', 'candidate', 'now')")).toThrow();
+    expect(() => database.run("UPDATE runtime_plugin_registrations SET registration_kind = 'unknown' WHERE id = 'registration-1'")).toThrow();
+    expect(() => database.run("UPDATE runtime_plugin_effects SET effect_type = 'unknown' WHERE id = 'effect-1'")).toThrow();
+    database.close();
+
+    const reopened = new RuntimeDatabase(filename);
+    expect(reopened.get<{ composition_state: string }>("SELECT composition_state FROM runtime_plugins WHERE id = 'consumer'"))
+      .toEqual({ composition_state: "pending_dependency" });
     reopened.close();
   });
 });
