@@ -18,6 +18,8 @@ export type HarnessErrorCode =
   | "confirmation_not_applicable"
   | "failure_case_invalid"
   | "reproduction_validation_rejected"
+  | "evolution_not_eligible"
+  | "skill_candidate_invalid"
   | "database_busy"
   | "storage_failure";
 

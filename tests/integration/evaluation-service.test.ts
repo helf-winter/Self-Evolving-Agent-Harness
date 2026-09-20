@@ -60,6 +60,7 @@ describe("EvaluationService", () => {
     const result = evaluations.evaluateAttempt({ projectId: "p1", attemptId: attempt.attemptId, proposedVerdict: "succeeded", riskSummary: null });
     expect(result.transition).toMatchObject({ applied: true, targetStatus: "succeeded" });
     expect(database.all<{ verdict: string }>("SELECT verdict FROM evaluations WHERE task_node_id = 'n1' ORDER BY created_at, rowid").map((row) => row.verdict)).toEqual(["failed", "failed", "succeeded"]);
+    expect(database.all("SELECT id FROM experiences WHERE source_task_node_id = 'n1'")).toHaveLength(1);
     expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n1'")).toEqual({ status: "succeeded" });
     database.close();
   });

@@ -10,20 +10,23 @@ import { RuntimeActionService } from "./runtime-action-service.js";
 import { TaskTreeService } from "./task-tree-service.js";
 import { WorkflowService } from "./workflow-service.js";
 import { FailureCaseService } from "./failure-case-service.js";
+import { EvolutionService } from "./evolution-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
   const projects = new ProjectIdentityService(database);
   const drifts = new PlanDriftService(database);
   const failures = new FailureCaseService(database);
+  const evolution = new EvolutionService(database);
   return {
     database,
     projects,
     taskTrees: new TaskTreeService(database),
     workflows: new WorkflowService(database),
     executions: new NodeExecutionService(database),
-    evaluations: new EvaluationService(database, failures),
+    evaluations: new EvaluationService(database, failures, evolution),
     failures,
+    evolution,
     drifts,
     actions: new RuntimeActionService(database, drifts),
     queries: new RuntimeQueryService(database),
