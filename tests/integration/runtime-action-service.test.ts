@@ -105,6 +105,34 @@ describe("RuntimeActionService Plan Drift resolution", () => {
     expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n1'")).toEqual({ status: "blocked" });
   });
 
+  it("keeps Runtime State pointed at another pending confirmation after one action resolves", async () => {
+    const { database, blocking, service } = await fixture();
+    const another = new PlanDriftService(database).recordDrift({
+      projectId: "p1", treeId: "t1", nodeId: "n1", driftType: "relation_changed", severity: "blocking",
+      description: "A second contract conflict", explanation: "Another confirmed boundary changed",
+      recommendation: "Accept the updated relation or restore the confirmed relation",
+    });
+    const first = service.proposePlanDriftResolution({
+      projectId: "p1", driftId: blocking.driftId, expectedTreeRevisionId: "tr1", decision: "accepted",
+      reason: "Accept the first boundary", sourceMessageTraceEventId: "source-1",
+    });
+    const second = service.proposePlanDriftResolution({
+      projectId: "p1", driftId: another.driftId, expectedTreeRevisionId: "tr1", decision: "accepted",
+      reason: "Accept the second boundary", sourceMessageTraceEventId: "source-1",
+    });
+    addAnswer(database, "answer-first-yes");
+    service.resolveConfirmation({
+      projectId: "p1", confirmationId: first.confirmationId, answer: "yes", answerTraceEventId: "answer-first-yes",
+    });
+    expect(JSON.parse(database.get<{ state_json: string }>(
+      "SELECT state_json FROM runtime_states WHERE project_id = 'p1'",
+    )!.state_json)).toMatchObject({
+      state: "waiting_for_drift_resolution", waitingItemType: "drift_resolution", waitingItemId: second.confirmationId,
+    });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n1'"))
+      .toEqual({ status: "blocked" });
+  });
+
   it("rejects non-blocking, stale, foreign, and early-evidence operations", async () => {
     const { database, blocking, warning, service } = await fixture();
     const common = { projectId: "p1", expectedTreeRevisionId: "tr1", decision: "accepted" as const, reason: "Review", sourceMessageTraceEventId: "source-1" };

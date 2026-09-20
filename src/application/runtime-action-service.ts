@@ -316,7 +316,7 @@ export class RuntimeActionService {
           "UPDATE runtime_actions SET status = 'rejected', result_json = ? WHERE id = ?",
           canonicalJson({ answer: "no" }), confirmation.runtime_action_id,
         );
-        this.clearRuntimeWaiting(input.projectId);
+        this.refreshRuntimeWaiting(input.projectId);
       });
       return {
         actionId: confirmation.runtime_action_id, actionType: "resolve_plan_drift",
@@ -348,7 +348,7 @@ export class RuntimeActionService {
         canonicalJson({ decision: resolution.decision, resolutionTraceEventId: resolutionTraceId }),
         resolvedAt, confirmation.runtime_action_id,
       );
-      this.clearRuntimeWaiting(input.projectId);
+      this.refreshRuntimeWaiting(input.projectId);
       return resolution;
     });
     return {
@@ -410,7 +410,7 @@ export class RuntimeActionService {
         this.database.run("UPDATE runtime_actions SET status = 'rejected', result_json = ? WHERE id = ?", canonicalJson({ answer: "no", userChangeId: change.id }), confirmation.runtime_action_id);
         this.database.run("UPDATE user_change_requests SET status = 'rejected', updated_at = ?, resolved_at = ? WHERE id = ?", resolvedAt, resolvedAt, change.id);
         this.database.run("UPDATE task_nodes SET status = ? WHERE id = ? AND tree_id = ?", restoredStatus, change.task_node_id, change.tree_id);
-        this.clearRuntimeWaiting(change.project_id);
+        this.refreshRuntimeWaiting(change.project_id);
       });
       return {
         actionId: confirmation.runtime_action_id, actionType: "record_user_change", targetId: change.id,
@@ -427,7 +427,7 @@ export class RuntimeActionService {
         this.database.run("UPDATE runtime_actions SET status = 'revision_conflict', result_json = ? WHERE id = ?", canonicalJson({ expectedRevision: change.expected_tree_revision_id, actualRevision: tree?.current_revision_id ?? null }), confirmation.runtime_action_id);
         this.database.run("UPDATE user_change_requests SET status = 'revision_conflict', updated_at = ?, resolved_at = ? WHERE id = ?", resolvedAt, resolvedAt, change.id);
         this.database.run("UPDATE runtime_confirmation_prompts SET status = 'cancelled', answer = ?, answer_trace_event_id = ?, resolved_at = ? WHERE id = ?", answer, answerTraceEventId, resolvedAt, confirmation.id);
-        this.clearRuntimeWaiting(change.project_id);
+        this.refreshRuntimeWaiting(change.project_id);
       });
       throw new HarnessError("revision_conflict", "scope change confirmation belongs to an older Task Tree revision");
     }
@@ -459,7 +459,7 @@ export class RuntimeActionService {
       this.database.run("UPDATE runtime_confirmation_prompts SET status = 'confirmed', answer = ?, answer_trace_event_id = ?, resolved_at = ? WHERE id = ?", answer, answerTraceEventId, resolvedAt, confirmation.id);
       this.database.run("UPDATE runtime_actions SET status = 'committed', result_json = ?, committed_at = ? WHERE id = ?", canonicalJson({ userChangeId: change.id, revisionId: revision.revisionId, traceEventId }), resolvedAt, confirmation.runtime_action_id);
       this.database.run("UPDATE user_change_requests SET status = 'applied', updated_at = ?, resolved_at = ? WHERE id = ?", resolvedAt, resolvedAt, change.id);
-      this.clearRuntimeWaiting(change.project_id);
+      this.refreshRuntimeWaiting(change.project_id);
       return revision;
     });
     return {
@@ -484,12 +484,35 @@ export class RuntimeActionService {
     `, projectId, treeId, nodeId, canonicalJson(state), nowIso());
   }
 
-  private clearRuntimeWaiting(projectId: string): void {
+  private refreshRuntimeWaiting(projectId: string): void {
     const current = this.database.get<{ state_json: string }>("SELECT state_json FROM runtime_states WHERE project_id = ?", projectId);
     const state = current ? JSON.parse(current.state_json) as Record<string, unknown> : {};
+    const currentWaitingId = typeof state.waitingItemId === "string" ? state.waitingItemId : null;
+    const selectPending = `
+      SELECT id, prompt_type FROM runtime_confirmation_prompts
+      WHERE project_id = ? AND status = 'pending'`;
+    const pending = currentWaitingId
+      ? this.database.get<{ id: string; prompt_type: string }>(`${selectPending} AND id = ?`, projectId, currentWaitingId)
+      : undefined;
+    const next = pending ?? this.database.get<{ id: string; prompt_type: string }>(
+      `${selectPending} ORDER BY created_at DESC, id DESC LIMIT 1`, projectId,
+    );
+    const waitingState = next?.prompt_type === "drift_resolution"
+      ? "waiting_for_drift_resolution"
+      : next?.prompt_type === "change_confirmation"
+        ? "waiting_for_change_confirmation"
+        : next
+          ? "waiting_for_confirmation"
+          : "idle";
     this.database.run(
       "UPDATE runtime_states SET state_json = ?, updated_at = ? WHERE project_id = ?",
-      canonicalJson({ ...state, state: "idle", waitingItemType: null, waitingItemId: null }), nowIso(), projectId,
+      canonicalJson({
+        ...state,
+        state: waitingState,
+        waitingItemType: next?.prompt_type ?? null,
+        waitingItemId: next?.id ?? null,
+      }),
+      nowIso(), projectId,
     );
   }
 

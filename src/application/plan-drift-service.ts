@@ -141,9 +141,16 @@ export class PlanDriftService {
       "UPDATE plan_drift_records SET resolution_status = ?, user_decision = ? WHERE id = ?",
       input.decision, input.decision, input.driftId,
     );
-    const nodeStatus = input.decision === "accepted"
-      ? "needs_revalidation"
-      : input.decision === "rejected" ? "ready" : "cancelled";
+    const remainingBlockingDrifts = this.database.get<{ count: number }>(`
+      SELECT count(*) AS count FROM plan_drift_records
+      WHERE project_id = ? AND tree_id = ? AND task_node_id = ?
+        AND severity = 'blocking' AND resolution_status = 'pending_user_confirmation'
+    `, input.projectId, drift.tree_id, drift.task_node_id)?.count ?? 0;
+    const nodeStatus = input.decision === "branch_cancelled"
+      ? "cancelled"
+      : remainingBlockingDrifts > 0
+        ? "blocked"
+        : input.decision === "accepted" ? "needs_revalidation" : "ready";
     this.database.run("UPDATE task_nodes SET status = ? WHERE id = ? AND tree_id = ?", nodeStatus, drift.task_node_id, drift.tree_id);
     return { treeId: drift.tree_id, nodeId: drift.task_node_id, decision: input.decision };
   }
