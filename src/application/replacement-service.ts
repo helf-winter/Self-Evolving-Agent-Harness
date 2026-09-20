@@ -414,7 +414,7 @@ export class ReplacementService {
         JOIN task_node_candidate_revisions c ON c.id = r.candidate_revision_id
         WHERE r.id = ? AND r.project_id = ?`, input.replacementId, input.projectId);
     if (!record) throw new HarnessError("not_found", "Task Node Replacement was not found in this Project");
-    if (record.status !== "suspending" || !record.confirmation_resolved_at) {
+    if (!(["suspending", "disposing"].includes(record.status)) || !record.confirmation_resolved_at) {
       throw new HarnessError("replacement_invalid", "Replacement must be confirmed and suspended before execution");
     }
     const tree = this.database.get<{ current_revision_id: string; document_json: string }>(`
@@ -430,7 +430,8 @@ export class ReplacementService {
       id: string; owner_revision_id: string; effect_type: TaskNodeEffectType; target_ref: string;
       baseline_ref: string | null; disposal_status: EffectDisposalStatus;
     }>(`SELECT id, owner_revision_id, effect_type, target_ref, baseline_ref, disposal_status
-        FROM task_node_effects WHERE project_id = ? AND owner_revision_id = ? AND disposal_status = 'active' ORDER BY id`,
+        FROM task_node_effects WHERE project_id = ? AND owner_revision_id = ?
+          AND disposal_status IN ('active', 'conflict', 'manual_resolution') ORDER BY id`,
     input.projectId, record.old_revision_id);
     const dispositions = new Map(input.dispositions.map((item) => [item.effectId, item]));
     if (dispositions.size !== input.dispositions.length || effects.some((effect) => !dispositions.has(effect.id))
@@ -466,7 +467,9 @@ export class ReplacementService {
     });
     const executedAt = nowIso();
     return this.database.transaction(() => {
-      const disposalResultIds: string[] = [];
+      const disposalResultIds = JSON.parse(this.database.get<{ disposal_result_refs_json: string }>(
+        "SELECT disposal_result_refs_json FROM task_node_replacement_records WHERE id = ?", record.id,
+      )!.disposal_result_refs_json) as string[];
       const allTraceIds = new Set<string>([
         ...(JSON.parse(record.trace_event_ids_json) as string[]),
         ...input.activationEvidenceRefs,

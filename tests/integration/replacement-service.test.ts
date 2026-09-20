@@ -43,6 +43,7 @@ async function fixture() {
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('dispose', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2033', 'dispose')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('activate', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2034', 'activate')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('recover', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2035', 'recover')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('retry', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2036', 'retry')");
   return { database, service: new ReplacementService(database) };
 }
 
@@ -192,7 +193,7 @@ describe("ReplacementService Effect Registry", () => {
       targetRef: "artifact:file1", operation: "modify provider", baselineRef: "hash:current",
       inverseOperation: "restore provider", compensationOperation: null, evidenceRefs: ["trace-n1"],
     });
-    service.registerTaskNodeEffect({
+    const shared = service.registerTaskNodeEffect({
       projectId: "p1", ownerRevisionId: "nr2", effectType: "version_reversible",
       targetRef: "artifact:file1", operation: "modify consumer", baselineRef: "hash:current",
       inverseOperation: "restore consumer", compensationOperation: null, evidenceRefs: ["trace-n2"],
@@ -212,6 +213,13 @@ describe("ReplacementService Effect Registry", () => {
       .toEqual({ current_revision_id: "tr1" });
     expect(database.get<{ disposal_status: string }>("SELECT disposal_status FROM effect_disposal_results WHERE replacement_id = ?", preview.replacementId))
       .toEqual({ disposal_status: "conflict" });
+    database.run("UPDATE task_node_effects SET disposal_status = 'disposed', disposed_at = '2035' WHERE id = ?", shared.effectId);
+    expect(service.executeTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId,
+      dispositions: [{ effectId: effect.effectId, action: "inverse_applied", observedBaselineRef: "hash:current", evidenceRefs: ["retry"], residualImpact: "" }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["activate"],
+    })).toMatchObject({ status: "completed" });
+    expect(database.all("SELECT id FROM effect_disposal_results WHERE replacement_id = ? AND task_node_effect_id = ?", preview.replacementId, effect.effectId)).toHaveLength(2);
     database.close();
   });
 

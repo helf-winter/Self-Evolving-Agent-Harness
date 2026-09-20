@@ -679,8 +679,7 @@ export const migrations: Migration[] = [{
       observed_baseline_ref TEXT,
       evidence_refs_json TEXT NOT NULL,
       residual_impact TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      UNIQUE(replacement_id, task_node_effect_id)
+      created_at TEXT NOT NULL
     );
     CREATE INDEX effect_disposal_replacement_idx
       ON effect_disposal_results(replacement_id, created_at);
