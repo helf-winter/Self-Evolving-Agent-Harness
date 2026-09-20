@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeQueryService } from "../../src/application/runtime-query-service.js";
 import { PlanDriftService } from "../../src/application/plan-drift-service.js";
 import { TaskTreeService } from "../../src/application/task-tree-service.js";
+import { FailureCaseService } from "../../src/application/failure-case-service.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
 
 const dirs: string[] = [];
@@ -32,7 +33,9 @@ async function fixture() {
   const drifts = new PlanDriftService(database);
   drifts.recordDrift({ projectId: "p1", treeId: tree.treeId, nodeId, actualArtifactId: "route-file", driftType: "relation_changed", severity: "warning", description: "Observed relation differs", explanation: "Implementation updated the relation" });
   drifts.recordDrift({ projectId: "p1", treeId: tree.treeId, nodeId, plannedArtifactId: "route-contract", driftType: "responsibility_changed", severity: "blocking", description: "Responsibility moved", explanation: "The confirmed owner no longer applies", recommendation: "Refine this branch" });
-  return { database, tree, service: new RuntimeQueryService(database) };
+  database.run("INSERT INTO lifecycle_transition_records (id, evaluation_id, task_node_id, policy_version, from_status, target_status, applied, rejection_code, created_at) VALUES ('lt-query', 'v1', ?, 'v1', 'verifying', 'failed', 1, NULL, '2026-01-04')", nodeId);
+  const failure = new FailureCaseService(database).captureFailedEvaluationWithinTransaction({ projectId: "p1", evaluationId: "v1" });
+  return { database, tree, failure, service: new RuntimeQueryService(database) };
 }
 afterEach(async () => Promise.all(dirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
 
@@ -121,6 +124,36 @@ describe("RuntimeQueryService", () => {
       userChange: { userChangeId: "uc-query", changeType: "scope_change" },
     });
     expect(() => service.getRuntimeActionDetail("p2", "ra-query")).toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
+
+  it("paginates Failure Cases and returns source-linked reproduction detail", async () => {
+    const { database, tree, failure, service } = await fixture();
+    const nodeId = tree.document.nodes[0]!.id;
+    const nodeRevision = database.get<{ id: string }>("SELECT id FROM task_node_revisions WHERE node_id = ?", nodeId)!;
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at, completed_at) VALUES ('a-f2', 'p1', ?, ?, ?, 2, 'failed', '2030-01-01', '2030-01-02')", tree.treeId, nodeId, nodeRevision.id);
+    database.run("INSERT INTO evaluations (id, project_id, tree_id, task_node_id, task_node_revision_id, execution_attempt_id, verdict, evidence_refs_json, covered_required_evidence_json, missing_required_evidence_json, risk_summary, created_at) VALUES ('v-f2', 'p1', ?, ?, ?, 'a-f2', 'failed', '[\"e2\"]', '[]', '[]', 'different failure signature', '2030-01-02')", tree.treeId, nodeId, nodeRevision.id);
+    database.run("INSERT INTO lifecycle_transition_records (id, evaluation_id, task_node_id, policy_version, from_status, target_status, applied, rejection_code, created_at) VALUES ('lt-f2', 'v-f2', ?, 'v1', 'verifying', 'failed', 1, NULL, '2030-01-02')", nodeId);
+    new FailureCaseService(database).captureFailedEvaluationWithinTransaction({ projectId: "p1", evaluationId: "v-f2" });
+
+    const first = service.getFailureCases("p1", {
+      treeId: tree.treeId, nodeId, maturityLevel: "L0_observed", availabilityStatus: "active", limit: 1,
+    });
+    expect(first.items).toHaveLength(1);
+    expect(first.nextCursor).toBeTruthy();
+    expect(service.getFailureCases("p1", { limit: 1, cursor: first.nextCursor! }).items).toHaveLength(1);
+    const detail = service.getFailureCaseDetail("p1", failure.failureCaseId);
+    expect(detail.failureCase).toMatchObject({
+      failureCaseId: failure.failureCaseId, treeId: tree.treeId, sourceNodeId: nodeId,
+      sourceAttemptId: "a1", sourceEvaluationId: "v1", maturityLevel: "L0_observed",
+    });
+    expect(detail.occurrences).toEqual([expect.objectContaining({ attemptId: "a1", evaluationId: "v1" })]);
+    expect(detail.reproductionRevisions).toEqual([expect.objectContaining({
+      reproductionRevisionId: failure.reproductionRevisionId, revisionNumber: 1, mode: "observed",
+    })]);
+    expect(detail.validationResults).toEqual([]);
+    expect(detail.relatedArtifacts).toEqual([expect.objectContaining({ artifactId: "route-file" })]);
+    expect(() => service.getFailureCaseDetail("p2", failure.failureCaseId)).toThrow(expect.objectContaining({ code: "not_found" }));
     database.close();
   });
 });

@@ -3,6 +3,7 @@ import type { TaskNodeInput, TaskTreeDocument } from "../domain/task-tree.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 import type { PlanDriftResolutionStatus, PlanDriftSeverity } from "./plan-drift-service.js";
 import type { UserChangeType } from "../domain/runtime-action.js";
+import type { FailureAvailabilityStatus, FailureMaturityLevel } from "../domain/failure-case.js";
 
 interface TraceRow {
   id: string;
@@ -455,6 +456,132 @@ export class RuntimeQueryService {
       } : null,
       userChange: change ? this.mapUserChange(change) : null,
       planDrift: drift ? this.mapDrift(drift) : null,
+    };
+  }
+
+  getFailureCases(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    maturityLevel?: FailureMaturityLevel;
+    availabilityStatus?: FailureAvailabilityStatus;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["f.project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("f.tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("f.source_task_node_id = ?"); params.push(query.nodeId); }
+    if (query.maturityLevel) { filters.push("f.maturity_level = ?"); params.push(query.maturityLevel); }
+    if (query.availabilityStatus) { filters.push("f.availability_status = ?"); params.push(query.availabilityStatus); }
+    const rows = this.database.all<{
+      id: string; tree_id: string; source_task_node_id: string | null; source_execution_attempt_id: string;
+      source_evaluation_id: string; failure_goal: string; failure_signature: string;
+      maturity_level: FailureMaturityLevel; availability_status: FailureAvailabilityStatus;
+      current_reproduction_revision_id: string | null; related_artifact_ids_json: string;
+      created_at: string; updated_at: string; occurrence_count: number; revision_count: number;
+    }>(`
+      SELECT f.id, f.tree_id, f.source_task_node_id, f.source_execution_attempt_id,
+             f.source_evaluation_id, f.failure_goal, f.failure_signature, f.maturity_level,
+             f.availability_status, f.current_reproduction_revision_id, f.related_artifact_ids_json,
+             f.created_at, f.updated_at,
+             (SELECT count(*) FROM failure_case_occurrences o WHERE o.failure_case_id = f.id) AS occurrence_count,
+             (SELECT count(*) FROM failure_reproduction_revisions r WHERE r.failure_case_id = f.id) AS revision_count
+      FROM failure_cases f WHERE ${filters.join(" AND ")}
+      ORDER BY f.updated_at DESC, f.id DESC LIMIT ? OFFSET ?
+    `, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        failureCaseId: row.id, treeId: row.tree_id, sourceNodeId: row.source_task_node_id,
+        sourceAttemptId: row.source_execution_attempt_id, sourceEvaluationId: row.source_evaluation_id,
+        failureGoal: row.failure_goal, failureSignature: JSON.parse(row.failure_signature) as unknown,
+        maturityLevel: row.maturity_level, availabilityStatus: row.availability_status,
+        currentReproductionRevisionId: row.current_reproduction_revision_id,
+        relatedArtifactIds: JSON.parse(row.related_artifact_ids_json) as string[],
+        occurrenceCount: row.occurrence_count, revisionCount: row.revision_count,
+        createdAt: row.created_at, updatedAt: row.updated_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getFailureCaseDetail(projectId: string, failureCaseId: string) {
+    this.requireProject(projectId);
+    const failure = this.database.get<{
+      id: string; tree_id: string; source_task_node_id: string | null; source_execution_attempt_id: string;
+      source_evaluation_id: string; failure_goal: string; failure_signature: string;
+      maturity_level: FailureMaturityLevel; availability_status: FailureAvailabilityStatus;
+      current_reproduction_revision_id: string | null; related_artifact_ids_json: string;
+      created_at: string; updated_at: string;
+    }>(`
+      SELECT id, tree_id, source_task_node_id, source_execution_attempt_id, source_evaluation_id,
+             failure_goal, failure_signature, maturity_level, availability_status,
+             current_reproduction_revision_id, related_artifact_ids_json, created_at, updated_at
+      FROM failure_cases WHERE id = ? AND project_id = ?
+    `, failureCaseId, projectId);
+    if (!failure) throw new HarnessError("not_found", "Failure Case was not found in this Project");
+    const occurrences = this.database.all<{
+      id: string; execution_attempt_id: string; evaluation_id: string; evidence_refs_json: string; created_at: string;
+    }>(`
+      SELECT id, execution_attempt_id, evaluation_id, evidence_refs_json, created_at
+      FROM failure_case_occurrences WHERE failure_case_id = ? AND project_id = ?
+      ORDER BY created_at, id
+    `, failureCaseId, projectId).map((row) => ({
+      occurrenceId: row.id, attemptId: row.execution_attempt_id, evaluationId: row.evaluation_id,
+      evidenceRefs: JSON.parse(row.evidence_refs_json) as string[], createdAt: row.created_at,
+    }));
+    const revisions = this.database.all<{
+      id: string; revision_number: number; reproduction_mode: string; contract_json: string;
+      validation_status: string; created_at: string;
+    }>(`
+      SELECT id, revision_number, reproduction_mode, contract_json, validation_status, created_at
+      FROM failure_reproduction_revisions WHERE failure_case_id = ? AND project_id = ?
+      ORDER BY revision_number
+    `, failureCaseId, projectId).map((row) => ({
+      reproductionRevisionId: row.id, revisionNumber: row.revision_number, mode: row.reproduction_mode,
+      contract: JSON.parse(row.contract_json) as unknown, validationStatus: row.validation_status, createdAt: row.created_at,
+    }));
+    const validations = this.database.all<{
+      id: string; reproduction_revision_id: string; observation_json: string; evidence_refs_json: string;
+      maturity_promotion_verdict: string; rejection_reasons_json: string; created_at: string;
+    }>(`
+      SELECT id, reproduction_revision_id, observation_json, evidence_refs_json,
+             maturity_promotion_verdict, rejection_reasons_json, created_at
+      FROM reproduction_validation_results WHERE failure_case_id = ? AND project_id = ?
+      ORDER BY created_at, id
+    `, failureCaseId, projectId).map((row) => ({
+      validationResultId: row.id, reproductionRevisionId: row.reproduction_revision_id,
+      observation: JSON.parse(row.observation_json) as unknown,
+      evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
+      promotedMaturity: row.maturity_promotion_verdict,
+      rejectionReasons: JSON.parse(row.rejection_reasons_json) as string[], createdAt: row.created_at,
+    }));
+    const artifactIds = JSON.parse(failure.related_artifact_ids_json) as string[];
+    const relatedArtifacts = artifactIds.length === 0 ? [] : this.database.all<{
+      id: string; artifact_type: string; granularity: string; locator: string; status: string;
+    }>(`
+      SELECT id, artifact_type, granularity, locator, status FROM artifacts
+      WHERE project_id = ? AND id IN (${artifactIds.map(() => "?").join(", ")}) ORDER BY id
+    `, projectId, ...artifactIds).map((row) => ({
+      artifactId: row.id, artifactType: row.artifact_type, granularity: row.granularity,
+      locator: row.locator, status: row.status,
+    }));
+    return {
+      failureCase: {
+        failureCaseId: failure.id, treeId: failure.tree_id, sourceNodeId: failure.source_task_node_id,
+        sourceAttemptId: failure.source_execution_attempt_id, sourceEvaluationId: failure.source_evaluation_id,
+        failureGoal: failure.failure_goal, failureSignature: JSON.parse(failure.failure_signature) as unknown,
+        maturityLevel: failure.maturity_level, availabilityStatus: failure.availability_status,
+        currentReproductionRevisionId: failure.current_reproduction_revision_id,
+        relatedArtifactIds: artifactIds, createdAt: failure.created_at, updatedAt: failure.updated_at,
+      },
+      occurrences,
+      reproductionRevisions: revisions,
+      validationResults: validations,
+      relatedArtifacts,
     };
   }
 

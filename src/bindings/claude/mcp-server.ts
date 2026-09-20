@@ -4,6 +4,7 @@ import { z } from "zod";
 import { openRuntime } from "../../application/runtime.js";
 import { HarnessError } from "../../domain/errors.js";
 import type { TaskTreeDocument } from "../../domain/task-tree.js";
+import type { FailureReproductionContract, ReproductionValidationObservation } from "../../domain/failure-case.js";
 
 function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
@@ -15,6 +16,39 @@ function failure(error: unknown) {
 }
 
 const cwdSchema = z.string().min(1).optional().describe("Project directory; defaults to the MCP process cwd");
+const failureContractSchema = z.object({
+  mode: z.enum(["manual", "assisted", "automated"]),
+  preconditions: z.array(z.string().min(1)).min(1),
+  environmentManifest: z.record(z.string(), z.string()),
+  sourceRevisionRef: z.string().min(1),
+  fixtureRefs: z.array(z.string().min(1)).min(1),
+  setupSteps: z.array(z.string().min(1)).min(1),
+  reproductionSteps: z.array(z.string().min(1)).min(1),
+  cleanupSteps: z.array(z.string().min(1)).min(1),
+  entryCommand: z.string().min(1).nullable(),
+  timeoutMs: z.number().int().positive().nullable(),
+  isolationStrategy: z.enum(["fixture", "worktree", "temporary_directory", "project_native", "container", "virtual_environment"]),
+  expectedResult: z.string().min(1),
+  actualFailure: z.string().min(1),
+  failureOracle: z.object({
+    kind: z.enum(["exit_code", "assertion", "failure_signature", "artifact_state", "schema"]),
+    expression: z.string().min(1),
+  }),
+  expectedFailureSignature: z.string().min(1).nullable(),
+  preFixBaselineRef: z.string().min(1).nullable(),
+  postFixBaselineRef: z.string().min(1).nullable(),
+  repeatPolicy: z.object({ runs: z.number().int().positive(), allowedFailures: z.number().int().min(0) }),
+  automationCoverage: z.number().min(0).max(1),
+  evidenceRefs: z.array(z.string().min(1)).min(1),
+});
+const reproductionObservationSchema = z.object({
+  preFixVerdict: z.enum(["red", "not_red", "not_run"]),
+  postFixVerdict: z.enum(["green", "not_green", "not_run"]),
+  oracleDiscriminationVerdict: z.enum(["pass", "fail", "not_run"]),
+  repeatStabilityVerdict: z.enum(["pass", "fail", "not_run"]),
+  isolationVerdict: z.enum(["pass", "fail", "not_run"]),
+  evidenceRefs: z.array(z.string().min(1)).min(1),
+});
 
 export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   const runtime = openRuntime(environment);
@@ -243,6 +277,53 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     },
   }, ({ cwd, confirmationId, answer, answerTraceEventId }) => guarded(async () => runtime.actions.resolveConfirmation({
     projectId: (await existingProject(cwd)).projectId, confirmationId, answer, answerTraceEventId,
+  })));
+
+  server.registerTool("harness_get_failure_cases", {
+    description: "Get paginated Failure Cases for the current project, filtered by Task scope, maturity, or availability.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(),
+      maturityLevel: z.enum(["L0_observed", "L1_manual", "L2_assisted", "L3_automated", "L4_regression"]).optional(),
+      availabilityStatus: z.enum(["active", "flaky", "environment_blocked", "quarantined", "obsolete"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, maturityLevel, availabilityStatus, limit, cursor }) => guarded(async () => runtime.queries.getFailureCases(
+    (await existingProject(cwd)).projectId,
+    {
+      ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}),
+      ...(maturityLevel ? { maturityLevel } : {}), ...(availabilityStatus ? { availabilityStatus } : {}),
+      ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+    },
+  )));
+
+  server.registerTool("harness_get_failure_case_detail", {
+    description: "Get one Failure Case with source Attempt/Evaluation, occurrences, reproduction revisions, validations, and Artifacts.",
+    inputSchema: { cwd: cwdSchema, failureCaseId: z.string().min(1) },
+  }, ({ cwd, failureCaseId }) => guarded(async () => runtime.queries.getFailureCaseDetail(
+    (await existingProject(cwd)).projectId, failureCaseId,
+  )));
+
+  server.registerTool("harness_add_failure_reproduction", {
+    description: "Append a structured Failure Reproduction Revision. The declared entry command is stored but never executed by this tool.",
+    inputSchema: { cwd: cwdSchema, failureCaseId: z.string().min(1), contract: failureContractSchema },
+  }, ({ cwd, failureCaseId, contract }) => guarded(async () => runtime.failures.addReproductionRevision({
+    projectId: (await existingProject(cwd)).projectId,
+    failureCaseId,
+    contract: contract as FailureReproductionContract,
+  })));
+
+  server.registerTool("harness_validate_failure_reproduction", {
+    description: "Record independent evidence-backed reproduction observations and deterministically compute permitted maturity.",
+    inputSchema: {
+      cwd: cwdSchema, failureCaseId: z.string().min(1), reproductionRevisionId: z.string().min(1),
+      observation: reproductionObservationSchema, idempotencyKey: z.string().min(1),
+    },
+  }, ({ cwd, failureCaseId, reproductionRevisionId, observation, idempotencyKey }) => guarded(async () => runtime.failures.validateReproduction({
+    projectId: (await existingProject(cwd)).projectId,
+    failureCaseId,
+    reproductionRevisionId,
+    observation: observation as ReproductionValidationObservation,
+    idempotencyKey,
   })));
 
   server.registerTool("harness_start_node_attempt", {

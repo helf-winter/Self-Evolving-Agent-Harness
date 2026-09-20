@@ -30,6 +30,8 @@ describe("Harness MCP binding", () => {
       "harness_record_plan_drift",
       "harness_get_waiting_items", "harness_get_user_change_requests", "harness_get_runtime_action_detail",
       "harness_propose_plan_drift_resolution", "harness_propose_user_change", "harness_resolve_runtime_confirmation",
+      "harness_get_failure_cases", "harness_get_failure_case_detail",
+      "harness_add_failure_reproduction", "harness_validate_failure_reproduction",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -45,6 +47,12 @@ describe("Harness MCP binding", () => {
     });
     expect(tools.find((tool) => tool.name === "harness_resolve_runtime_confirmation")?.inputSchema).toMatchObject({
       properties: { answer: { enum: ["yes", "no", "pause"] } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_add_failure_reproduction")?.inputSchema).toMatchObject({
+      properties: { contract: { properties: { mode: { enum: ["manual", "assisted", "automated"] } } } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_validate_failure_reproduction")?.inputSchema).toMatchObject({
+      properties: { observation: { properties: { preFixVerdict: { enum: ["red", "not_red", "not_run"] } } } },
     });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
@@ -66,6 +74,7 @@ describe("Harness MCP binding", () => {
     expect(graph.isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_waiting_items", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_failure_cases", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {
