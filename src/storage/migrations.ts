@@ -364,4 +364,72 @@ export const migrations: Migration[] = [{
     CREATE INDEX user_change_scope_idx
       ON user_change_requests(project_id, tree_id, task_node_id, change_type, status, created_at DESC);
   `,
+}, {
+  version: 6,
+  sql: `
+    CREATE TABLE failure_cases (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      source_task_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL,
+      source_execution_attempt_id TEXT NOT NULL REFERENCES execution_attempts(id) ON DELETE RESTRICT,
+      source_evaluation_id TEXT NOT NULL REFERENCES evaluations(id) ON DELETE RESTRICT,
+      failure_goal TEXT NOT NULL,
+      failure_signature TEXT NOT NULL,
+      maturity_level TEXT NOT NULL CHECK(maturity_level IN ('L0_observed', 'L1_manual', 'L2_assisted', 'L3_automated', 'L4_regression')),
+      availability_status TEXT NOT NULL CHECK(availability_status IN ('active', 'flaky', 'environment_blocked', 'quarantined', 'obsolete')),
+      current_reproduction_revision_id TEXT,
+      related_artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(project_id, failure_signature)
+    );
+    CREATE INDEX failure_case_scope_idx
+      ON failure_cases(project_id, tree_id, source_task_node_id, maturity_level, availability_status, updated_at DESC);
+
+    CREATE TABLE failure_case_occurrences (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      failure_case_id TEXT NOT NULL REFERENCES failure_cases(id) ON DELETE CASCADE,
+      execution_attempt_id TEXT NOT NULL REFERENCES execution_attempts(id) ON DELETE RESTRICT,
+      evaluation_id TEXT NOT NULL REFERENCES evaluations(id) ON DELETE RESTRICT,
+      evidence_refs_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, evaluation_id)
+    );
+    CREATE INDEX failure_occurrence_case_idx ON failure_case_occurrences(failure_case_id, created_at DESC);
+
+    CREATE TABLE failure_reproduction_revisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      failure_case_id TEXT NOT NULL REFERENCES failure_cases(id) ON DELETE CASCADE,
+      revision_number INTEGER NOT NULL CHECK(revision_number > 0),
+      reproduction_mode TEXT NOT NULL CHECK(reproduction_mode IN ('observed', 'manual', 'assisted', 'automated')),
+      contract_json TEXT NOT NULL,
+      validation_status TEXT NOT NULL CHECK(validation_status IN ('draft', 'verified_manual', 'verified_assisted', 'verified_automated', 'rejected', 'stale')),
+      created_at TEXT NOT NULL,
+      UNIQUE(failure_case_id, revision_number)
+    );
+    CREATE INDEX failure_reproduction_case_idx ON failure_reproduction_revisions(failure_case_id, revision_number DESC);
+
+    CREATE TABLE reproduction_validation_results (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      failure_case_id TEXT NOT NULL REFERENCES failure_cases(id) ON DELETE CASCADE,
+      reproduction_revision_id TEXT NOT NULL REFERENCES failure_reproduction_revisions(id) ON DELETE RESTRICT,
+      observation_json TEXT NOT NULL,
+      pre_fix_verdict TEXT NOT NULL CHECK(pre_fix_verdict IN ('red', 'not_red', 'not_run')),
+      post_fix_verdict TEXT NOT NULL CHECK(post_fix_verdict IN ('green', 'not_green', 'not_run')),
+      oracle_discrimination_verdict TEXT NOT NULL CHECK(oracle_discrimination_verdict IN ('pass', 'fail', 'not_run')),
+      repeat_stability_verdict TEXT NOT NULL CHECK(repeat_stability_verdict IN ('pass', 'fail', 'not_run')),
+      isolation_verdict TEXT NOT NULL CHECK(isolation_verdict IN ('pass', 'fail', 'not_run')),
+      evidence_refs_json TEXT NOT NULL,
+      maturity_promotion_verdict TEXT NOT NULL CHECK(maturity_promotion_verdict IN ('L0_observed', 'L1_manual', 'L2_assisted', 'L3_automated', 'L4_regression')),
+      rejection_reasons_json TEXT NOT NULL DEFAULT '[]',
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX reproduction_validation_revision_idx
+      ON reproduction_validation_results(reproduction_revision_id, created_at DESC);
+  `,
 }];

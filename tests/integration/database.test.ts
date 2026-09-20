@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(5);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(6);
     reopened.close();
   });
 
@@ -146,5 +146,40 @@ describe("RuntimeDatabase", () => {
       prompt_type: "branch_confirmation", related_artifact_ids_json: "[]", options_json: '["yes","no"]',
     });
     database.close();
+  });
+
+  it("persists constrained Failure Cases, occurrences, revisions, and validation results", async () => {
+    const filename = await databasePath();
+    const database = new RuntimeDatabase(filename);
+    expect(database.all<{ name: string }>(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('failure_cases', 'failure_case_occurrences', 'failure_reproduction_revisions', 'reproduction_validation_results')
+      ORDER BY name
+    `)).toEqual([
+      { name: "failure_case_occurrences" }, { name: "failure_cases" },
+      { name: "failure_reproduction_revisions" }, { name: "reproduction_validation_results" },
+    ]);
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO task_trees (id, project_id, title, status, current_revision_id, created_at, updated_at) VALUES ('t1', 'p1', 'Tree', 'confirmed', 'tr1', 'now', 'now')");
+    database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('tr1', 't1', 1, '{}', 'now')");
+    database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES ('n1', 't1', NULL, 'Node', 'failed')");
+    database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr1', 'n1', 'tr1', '{}', 'now')");
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at, completed_at) VALUES ('a1', 'p1', 't1', 'n1', 'nr1', 1, 'failed', 'now', 'now')");
+    database.run("INSERT INTO evaluations (id, project_id, tree_id, task_node_id, task_node_revision_id, execution_attempt_id, verdict, evidence_refs_json, covered_required_evidence_json, missing_required_evidence_json, risk_summary, created_at) VALUES ('e1', 'p1', 't1', 'n1', 'nr1', 'a1', 'failed', '[]', '[]', '[]', 'failure', 'now')");
+    database.run("INSERT INTO failure_cases (id, project_id, tree_id, source_task_node_id, source_execution_attempt_id, source_evaluation_id, failure_goal, failure_signature, maturity_level, availability_status, related_artifact_ids_json, created_at, updated_at) VALUES ('f1', 'p1', 't1', 'n1', 'a1', 'e1', 'Make test pass', '{\"kind\":\"assertion\"}', 'L0_observed', 'active', '[]', 'now', 'now')");
+    database.run("INSERT INTO failure_case_occurrences (id, project_id, failure_case_id, execution_attempt_id, evaluation_id, evidence_refs_json, created_at) VALUES ('o1', 'p1', 'f1', 'a1', 'e1', '[]', 'now')");
+    database.run("INSERT INTO failure_reproduction_revisions (id, project_id, failure_case_id, revision_number, reproduction_mode, contract_json, validation_status, created_at) VALUES ('rr1', 'p1', 'f1', 1, 'observed', '{}', 'draft', 'now')");
+    database.run("UPDATE failure_cases SET current_reproduction_revision_id = 'rr1' WHERE id = 'f1'");
+    database.run("INSERT INTO reproduction_validation_results (id, project_id, failure_case_id, reproduction_revision_id, observation_json, pre_fix_verdict, post_fix_verdict, oracle_discrimination_verdict, repeat_stability_verdict, isolation_verdict, evidence_refs_json, maturity_promotion_verdict, idempotency_key, created_at) VALUES ('v1', 'p1', 'f1', 'rr1', '{}', 'not_run', 'not_run', 'not_run', 'not_run', 'not_run', '[]', 'L0_observed', 'validation-1', 'now')");
+    expect(() => database.run("UPDATE failure_cases SET maturity_level = 'invalid' WHERE id = 'f1'")).toThrow();
+    expect(() => database.run("INSERT INTO failure_reproduction_revisions (id, project_id, failure_case_id, revision_number, reproduction_mode, contract_json, validation_status, created_at) VALUES ('rr2', 'p1', 'f1', 1, 'manual', '{}', 'draft', 'now')")).toThrow();
+    database.close();
+
+    const reopened = new RuntimeDatabase(filename);
+    expect(reopened.get<{ maturity_level: string; current_reproduction_revision_id: string }>(
+      "SELECT maturity_level, current_reproduction_revision_id FROM failure_cases WHERE id = 'f1'",
+    )).toEqual({ maturity_level: "L0_observed", current_reproduction_revision_id: "rr1" });
+    expect(reopened.all("SELECT id FROM failure_case_occurrences WHERE failure_case_id = 'f1'")).toHaveLength(1);
+    reopened.close();
   });
 });
