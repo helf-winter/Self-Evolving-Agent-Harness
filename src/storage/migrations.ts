@@ -549,4 +549,139 @@ export const migrations: Migration[] = [{
     );
     CREATE INDEX skill_report_candidate_idx ON skill_validation_reports(skill_candidate_revision_id, created_at DESC);
   `,
+}, {
+  version: 8,
+  sql: `
+    CREATE TABLE task_node_candidate_revisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      base_tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      base_node_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      body_json TEXT NOT NULL,
+      provides_contract_ids_json TEXT NOT NULL,
+      requires_contract_ids_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX replacement_candidate_node_idx
+      ON task_node_candidate_revisions(project_id, tree_id, task_node_id, created_at DESC);
+
+    CREATE TABLE task_node_revision_contract_bindings (
+      task_node_revision_id TEXT PRIMARY KEY REFERENCES task_node_revisions(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      provides_contract_ids_json TEXT NOT NULL,
+      requires_contract_ids_json TEXT NOT NULL,
+      source_candidate_revision_id TEXT REFERENCES task_node_candidate_revisions(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE task_node_composition_states (
+      task_node_id TEXT PRIMARY KEY REFERENCES task_nodes(id) ON DELETE CASCADE,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      active_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      composition_state TEXT NOT NULL CHECK(composition_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_replanning', 'disposed'
+      )),
+      replacement_id TEXT,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX composition_state_scope_idx
+      ON task_node_composition_states(project_id, tree_id, composition_state);
+
+    CREATE TABLE task_node_composition_transitions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      task_node_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      from_state TEXT CHECK(from_state IS NULL OR from_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_replanning', 'disposed'
+      )),
+      to_state TEXT NOT NULL CHECK(to_state IN (
+        'pending_dependency', 'active', 'suspending', 'replacing', 'needs_replanning', 'disposed'
+      )),
+      reason TEXT NOT NULL,
+      replacement_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX composition_transition_node_idx
+      ON task_node_composition_transitions(task_node_id, created_at DESC);
+
+    CREATE TABLE task_node_effects (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      owner_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      effect_type TEXT NOT NULL CHECK(effect_type IN ('reversible', 'version_reversible', 'compensatable', 'irreversible')),
+      target_ref TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      baseline_ref TEXT,
+      inverse_operation TEXT,
+      compensation_operation TEXT,
+      evidence_refs_json TEXT NOT NULL,
+      disposal_status TEXT NOT NULL CHECK(disposal_status IN (
+        'active', 'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
+      )),
+      created_at TEXT NOT NULL,
+      disposed_at TEXT
+    );
+    CREATE INDEX task_node_effect_owner_idx
+      ON task_node_effects(project_id, tree_id, owner_revision_id, disposal_status);
+    CREATE INDEX task_node_effect_target_idx
+      ON task_node_effects(project_id, target_ref, disposal_status);
+
+    CREATE TABLE task_node_replacement_records (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      old_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      candidate_revision_id TEXT NOT NULL UNIQUE REFERENCES task_node_candidate_revisions(id) ON DELETE RESTRICT,
+      expected_tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      affected_task_node_ids_json TEXT NOT NULL,
+      suspension_order_json TEXT NOT NULL,
+      contract_diff_json TEXT NOT NULL,
+      effect_risk_summary_json TEXT NOT NULL,
+      user_confirmation_ref TEXT REFERENCES runtime_confirmation_prompts(id) ON DELETE SET NULL,
+      runtime_action_id TEXT UNIQUE REFERENCES runtime_actions(id) ON DELETE SET NULL,
+      status TEXT NOT NULL CHECK(status IN (
+        'pending_confirmation', 'suspending', 'disposing', 'activating',
+        'completed', 'rolled_back', 'replacement_failed'
+      )),
+      disposal_result_refs_json TEXT NOT NULL,
+      recovery_result_json TEXT,
+      trace_event_ids_json TEXT NOT NULL,
+      activated_tree_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX replacement_scope_idx
+      ON task_node_replacement_records(project_id, tree_id, task_node_id, status, created_at DESC);
+
+    CREATE TABLE effect_disposal_results (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      replacement_id TEXT NOT NULL REFERENCES task_node_replacement_records(id) ON DELETE CASCADE,
+      task_node_effect_id TEXT NOT NULL REFERENCES task_node_effects(id) ON DELETE RESTRICT,
+      disposition_action TEXT NOT NULL CHECK(disposition_action IN ('inverse_applied', 'compensation_applied', 'retain')),
+      disposal_capability TEXT NOT NULL CHECK(disposal_capability IN (
+        'auto_reversible', 'requires_baseline_check', 'compensation_only', 'manual_confirmation_required'
+      )),
+      disposal_status TEXT NOT NULL CHECK(disposal_status IN (
+        'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
+      )),
+      observed_baseline_ref TEXT,
+      evidence_refs_json TEXT NOT NULL,
+      residual_impact TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(replacement_id, task_node_effect_id)
+    );
+    CREATE INDEX effect_disposal_replacement_idx
+      ON effect_disposal_results(replacement_id, created_at);
+  `,
 }];

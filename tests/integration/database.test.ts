@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(7);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(8);
     reopened.close();
   });
 
@@ -207,6 +207,34 @@ describe("RuntimeDatabase", () => {
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ instruction_snapshot: string }>("SELECT instruction_snapshot FROM skill_candidate_revisions WHERE id = 'sc1'"))
       .toEqual({ instruction_snapshot: "Run focused tests" });
+    reopened.close();
+  });
+
+  it("persists constrained candidate, composition, Effect, disposal, and Replacement records", async () => {
+    const filename = await databasePath();
+    const database = new RuntimeDatabase(filename);
+    expect(database.all<{ name: string }>(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('task_node_candidate_revisions', 'task_node_revision_contract_bindings',
+                     'task_node_composition_states', 'task_node_composition_transitions',
+                     'task_node_effects', 'effect_disposal_results', 'task_node_replacement_records')
+      ORDER BY name
+    `)).toHaveLength(7);
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO task_trees (id, project_id, title, status, current_revision_id, created_at, updated_at) VALUES ('t1', 'p1', 'Tree', 'confirmed', 'tr1', 'now', 'now')");
+    database.run("INSERT INTO task_tree_revisions (id, tree_id, revision, document_json, created_at) VALUES ('tr1', 't1', 1, '{}', 'now')");
+    database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES ('n1', 't1', NULL, 'Node', 'succeeded')");
+    database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('nr1', 'n1', 'tr1', '{}', 'now')");
+    database.run("INSERT INTO task_node_candidate_revisions (id, project_id, tree_id, task_node_id, base_tree_revision_id, base_node_revision_id, body_json, provides_contract_ids_json, requires_contract_ids_json, created_at) VALUES ('candidate1', 'p1', 't1', 'n1', 'tr1', 'nr1', '{}', '[]', '[]', 'now')");
+    database.run("INSERT INTO task_node_replacement_records (id, project_id, tree_id, task_node_id, old_revision_id, candidate_revision_id, expected_tree_revision_id, affected_task_node_ids_json, suspension_order_json, contract_diff_json, effect_risk_summary_json, status, disposal_result_refs_json, trace_event_ids_json, created_at) VALUES ('replacement1', 'p1', 't1', 'n1', 'nr1', 'candidate1', 'tr1', '[\"n1\"]', '[\"n1\"]', '{}', '{}', 'pending_confirmation', '[]', '[]', 'now')");
+    database.run("INSERT INTO task_node_effects (id, project_id, tree_id, task_node_id, owner_revision_id, effect_type, target_ref, operation, baseline_ref, inverse_operation, compensation_operation, evidence_refs_json, disposal_status, created_at) VALUES ('effect1', 'p1', 't1', 'n1', 'nr1', 'version_reversible', 'artifact:file', 'modify', 'hash:1', 'restore', NULL, '[]', 'active', 'now')");
+    database.run("INSERT INTO effect_disposal_results (id, project_id, replacement_id, task_node_effect_id, disposition_action, disposal_capability, disposal_status, evidence_refs_json, residual_impact, created_at) VALUES ('disposal1', 'p1', 'replacement1', 'effect1', 'inverse_applied', 'requires_baseline_check', 'disposed', '[]', '', 'now')");
+    expect(() => database.run("UPDATE task_node_effects SET effect_type = 'unknown' WHERE id = 'effect1'")).toThrow();
+    expect(() => database.run("INSERT INTO effect_disposal_results (id, project_id, replacement_id, task_node_effect_id, disposition_action, disposal_capability, disposal_status, evidence_refs_json, residual_impact, created_at) VALUES ('disposal2', 'p1', 'replacement1', 'effect1', 'inverse_applied', 'requires_baseline_check', 'disposed', '[]', '', 'now')")).toThrow();
+    database.close();
+    const reopened = new RuntimeDatabase(filename);
+    expect(reopened.get<{ status: string }>("SELECT status FROM task_node_replacement_records WHERE id = 'replacement1'"))
+      .toEqual({ status: "pending_confirmation" });
     reopened.close();
   });
 });
