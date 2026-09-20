@@ -102,4 +102,25 @@ describe("RuntimeQueryService", () => {
     expect(() => service.getArtifactDetail("p1", "foreign-file")).toThrow(expect.objectContaining({ code: "not_found" }));
     database.close();
   });
+
+  it("returns typed waiting items, User Changes, and Runtime Action detail", async () => {
+    const { database, tree, service } = await fixture();
+    const nodeId = tree.document.nodes[0]!.id;
+    database.run("INSERT INTO runtime_actions (id, project_id, kind, input_json, result_json, created_at, action_type, target_type, target_id, expected_revision, reason, source_message_ref, risk_level, confirmation_requirement, confirmation_prompt_id, status) VALUES ('ra-query', 'p1', 'record_user_change', ?, '{}', '2030-01-01', 'record_user_change', 'user_change', 'uc-query', ?, 'Change scope', 'e1', 'high', 'required', 'confirmation-query', 'pending_confirmation')", JSON.stringify({ userChangeId: "uc-query", changeType: "scope_change" }), tree.revisionId);
+    database.run("INSERT INTO runtime_confirmation_prompts (id, project_id, tree_id, scope_id, prompt, status, created_at, tree_revision_id, scope_kind, scope_root_node_id, prompt_type, related_task_node_id, related_artifact_ids_json, options_json, runtime_action_id) VALUES ('confirmation-query', 'p1', ?, 'uc-query', 'Apply scope?', 'pending', '2030-01-01', ?, 'branch', ?, 'change_confirmation', ?, '[]', '[\"yes\",\"no\",\"pause\"]', 'ra-query')", tree.treeId, tree.revisionId, nodeId, nodeId);
+    database.run("INSERT INTO user_change_requests (id, project_id, tree_id, task_node_id, change_type, source_trace_event_id, expected_tree_revision_id, summary, change_impact_json, proposed_document_json, priority_target_node_id, prior_node_status, status, runtime_action_id, created_at, updated_at) VALUES ('uc-query', 'p1', ?, ?, 'scope_change', 'e1', ?, 'Change scope', '{\"changedNodes\":[]}', '{}', NULL, 'blocked', 'pending_confirmation', 'ra-query', '2030-01-01', '2030-01-01')", tree.treeId, nodeId, tree.revisionId);
+
+    expect(service.getRuntimeSnapshot("p1")).toMatchObject({ pendingConfirmationCount: 2 });
+    const waiting = service.getWaitingItems("p1", { promptType: "change_confirmation", limit: 10 });
+    expect(waiting.items).toEqual([expect.objectContaining({ confirmationId: "confirmation-query", promptType: "change_confirmation", actionStatus: "pending_confirmation" })]);
+    const changes = service.getUserChangeRequests("p1", { treeId: tree.treeId, changeType: "scope_change", status: "pending_confirmation" });
+    expect(changes.items).toEqual([expect.objectContaining({ userChangeId: "uc-query", nodeId, summary: "Change scope" })]);
+    expect(service.getRuntimeActionDetail("p1", "ra-query")).toMatchObject({
+      action: { actionId: "ra-query", actionType: "record_user_change", targetId: "uc-query" },
+      confirmation: { confirmationId: "confirmation-query", promptType: "change_confirmation" },
+      userChange: { userChangeId: "uc-query", changeType: "scope_change" },
+    });
+    expect(() => service.getRuntimeActionDetail("p2", "ra-query")).toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
 });

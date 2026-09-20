@@ -172,6 +172,79 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     ...(sourceTraceEventId ? { sourceTraceEventId } : {}),
   })));
 
+  server.registerTool("harness_get_waiting_items", {
+    description: "Get paginated pending Runtime Confirmation Prompts for the current project.",
+    inputSchema: {
+      cwd: cwdSchema,
+      promptType: z.enum(["branch_confirmation", "drift_resolution", "change_confirmation", "high_risk_action"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, promptType, limit, cursor }) => guarded(async () => runtime.queries.getWaitingItems(
+    (await existingProject(cwd)).projectId,
+    { ...(promptType ? { promptType } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_user_change_requests", {
+    description: "Get paginated User Change Requests for the current project with optional scope and lifecycle filters.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(),
+      changeType: z.enum(["minor_change", "scope_change", "priority_change"]).optional(),
+      status: z.enum(["proposed", "pending_confirmation", "paused", "applied", "rejected", "revision_conflict"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, changeType, status, limit, cursor }) => guarded(async () => runtime.queries.getUserChangeRequests(
+    (await existingProject(cwd)).projectId,
+    {
+      ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}),
+      ...(changeType ? { changeType } : {}), ...(status ? { status } : {}),
+      ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+    },
+  )));
+
+  server.registerTool("harness_get_runtime_action_detail", {
+    description: "Get one project-scoped Runtime Action with its confirmation and related Drift or User Change.",
+    inputSchema: { cwd: cwdSchema, actionId: z.string().min(1) },
+  }, ({ cwd, actionId }) => guarded(async () => runtime.queries.getRuntimeActionDetail(
+    (await existingProject(cwd)).projectId, actionId,
+  )));
+
+  server.registerTool("harness_propose_plan_drift_resolution", {
+    description: "Propose a typed blocking Plan Drift decision and create the required confirmation prompt.",
+    inputSchema: {
+      cwd: cwdSchema, driftId: z.string().min(1), expectedTreeRevisionId: z.string().min(1),
+      decision: z.enum(["accepted", "rejected", "branch_cancelled"]),
+      reason: z.string().min(1), sourceMessageTraceEventId: z.string().min(1),
+    },
+  }, ({ cwd, driftId, expectedTreeRevisionId, decision, reason, sourceMessageTraceEventId }) => guarded(async () => runtime.actions.proposePlanDriftResolution({
+    projectId: (await existingProject(cwd)).projectId, driftId, expectedTreeRevisionId,
+    decision, reason, sourceMessageTraceEventId,
+  })));
+
+  server.registerTool("harness_propose_user_change", {
+    description: "Record a structured minor, scope, or priority User Change; scope changes create a confirmation prompt.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().min(1), nodeId: z.string().optional(), expectedTreeRevisionId: z.string().min(1),
+      changeType: z.enum(["minor_change", "scope_change", "priority_change"]), summary: z.string().min(1),
+      changeImpact: z.record(z.string(), z.unknown()), sourceMessageTraceEventId: z.string().min(1),
+      proposedDocument: z.unknown().optional(), priorityTargetNodeId: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, expectedTreeRevisionId, changeType, summary, changeImpact, sourceMessageTraceEventId, proposedDocument, priorityTargetNodeId }) => guarded(async () => runtime.actions.proposeUserChange({
+    projectId: (await existingProject(cwd)).projectId, treeId, expectedTreeRevisionId, changeType,
+    summary, changeImpact, sourceMessageTraceEventId,
+    ...(nodeId ? { nodeId } : {}), ...(proposedDocument ? { proposedDocument: proposedDocument as TaskTreeDocument } : {}),
+    ...(priorityTargetNodeId ? { priorityTargetNodeId } : {}),
+  })));
+
+  server.registerTool("harness_resolve_runtime_confirmation", {
+    description: "Commit, reject, or pause a Drift/User Change Runtime Action using an explicit prompt ID and recorded user-answer Trace.",
+    inputSchema: {
+      cwd: cwdSchema, confirmationId: z.string().min(1), answer: z.enum(["yes", "no", "pause"]),
+      answerTraceEventId: z.string().min(1),
+    },
+  }, ({ cwd, confirmationId, answer, answerTraceEventId }) => guarded(async () => runtime.actions.resolveConfirmation({
+    projectId: (await existingProject(cwd)).projectId, confirmationId, answer, answerTraceEventId,
+  })));
+
   server.registerTool("harness_start_node_attempt", {
     description: "Start an evidence-backed Execution Attempt for the current Task Node revision.",
     inputSchema: { cwd: cwdSchema, nodeId: z.string().min(1), expectedTreeRevisionId: z.string().min(1) },

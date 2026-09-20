@@ -2,6 +2,7 @@ import { HarnessError } from "../domain/errors.js";
 import type { TaskNodeInput, TaskTreeDocument } from "../domain/task-tree.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 import type { PlanDriftResolutionStatus, PlanDriftSeverity } from "./plan-drift-service.js";
+import type { UserChangeType } from "../domain/runtime-action.js";
 
 interface TraceRow {
   id: string;
@@ -52,6 +53,25 @@ interface DriftRow {
   created_at: string;
 }
 
+interface UserChangeRow {
+  id: string;
+  tree_id: string;
+  task_node_id: string | null;
+  change_type: UserChangeType;
+  source_trace_event_id: string;
+  expected_tree_revision_id: string;
+  summary: string;
+  change_impact_json: string;
+  proposed_document_json: string | null;
+  priority_target_node_id: string | null;
+  prior_node_status: string | null;
+  status: string;
+  runtime_action_id: string;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
+}
+
 function decodeCursor(cursor?: string): number {
   if (!cursor) return 0;
   const value = Number(Buffer.from(cursor, "base64url").toString("utf8"));
@@ -86,12 +106,17 @@ export class RuntimeQueryService {
     )?.count ?? 0;
     const confirmationCounts = this.getConfirmationCounts(projectId, state?.selected_tree_id ?? workflow?.tree_id ?? null);
     const driftCounts = this.getDriftCounts(projectId, state?.selected_tree_id ?? workflow?.tree_id ?? null);
+    const pendingConfirmationCount = this.database.get<{ count: number }>(
+      "SELECT count(*) AS count FROM runtime_confirmation_prompts WHERE project_id = ? AND status = 'pending'",
+      projectId,
+    )?.count ?? 0;
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
       selectedNodeId: state?.selected_node_id ?? null,
       workflow: workflow ? { treeId: workflow.tree_id, stage: workflow.stage, revision: workflow.revision } : null,
       pendingConfirmation: confirmation ? { confirmationId: confirmation.id, scopeId: confirmation.scope_id, prompt: confirmation.prompt } : null,
+      pendingConfirmationCount,
       blockerCount: readiness ? (JSON.parse(readiness.blockers_json) as unknown[]).length : 0,
       activeAttemptCount,
       confirmationCounts,
@@ -313,6 +338,126 @@ export class RuntimeQueryService {
     };
   }
 
+  getWaitingItems(projectId: string, query: { promptType?: string; limit?: number; cursor?: string }) {
+    this.requireProject(projectId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["c.project_id = ?", "c.status = 'pending'"];
+    const params: Array<string | number> = [projectId];
+    if (query.promptType) { filters.push("c.prompt_type = ?"); params.push(query.promptType); }
+    const rows = this.database.all<{
+      id: string; tree_id: string | null; scope_id: string; prompt: string; prompt_type: string;
+      related_task_node_id: string | null; related_artifact_ids_json: string; options_json: string;
+      runtime_action_id: string | null; action_status: string | null; created_at: string;
+    }>(`
+      SELECT c.id, c.tree_id, c.scope_id, c.prompt, c.prompt_type, c.related_task_node_id,
+             c.related_artifact_ids_json, c.options_json, c.runtime_action_id,
+             a.status AS action_status, c.created_at
+      FROM runtime_confirmation_prompts c
+      LEFT JOIN runtime_actions a ON a.id = c.runtime_action_id AND a.project_id = c.project_id
+      WHERE ${filters.join(" AND ")}
+      ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?
+    `, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        confirmationId: row.id, treeId: row.tree_id, scopeId: row.scope_id, prompt: row.prompt,
+        promptType: row.prompt_type, relatedTaskNodeId: row.related_task_node_id,
+        relatedArtifactIds: JSON.parse(row.related_artifact_ids_json) as string[],
+        options: JSON.parse(row.options_json) as string[], runtimeActionId: row.runtime_action_id,
+        actionStatus: row.action_status, createdAt: row.created_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getUserChangeRequests(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    changeType?: UserChangeType;
+    status?: string;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("task_node_id = ?"); params.push(query.nodeId); }
+    if (query.changeType) { filters.push("change_type = ?"); params.push(query.changeType); }
+    if (query.status) { filters.push("status = ?"); params.push(query.status); }
+    const rows = this.database.all<UserChangeRow>(`
+      SELECT id, tree_id, task_node_id, change_type, source_trace_event_id, expected_tree_revision_id,
+             summary, change_impact_json, proposed_document_json, priority_target_node_id,
+             prior_node_status, status, runtime_action_id, created_at, updated_at, resolved_at
+      FROM user_change_requests WHERE ${filters.join(" AND ")}
+      ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+    `, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => this.mapUserChange(row)),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getRuntimeActionDetail(projectId: string, actionId: string) {
+    this.requireProject(projectId);
+    const action = this.database.get<{
+      id: string; action_type: string | null; target_type: string | null; target_id: string | null;
+      expected_revision: string | null; reason: string | null; source_message_ref: string | null;
+      risk_level: string; confirmation_requirement: string; confirmation_prompt_id: string | null;
+      status: string; input_json: string; result_json: string; created_at: string; committed_at: string | null;
+    }>(`
+      SELECT id, action_type, target_type, target_id, expected_revision, reason, source_message_ref,
+             risk_level, confirmation_requirement, confirmation_prompt_id, status,
+             input_json, result_json, created_at, committed_at
+      FROM runtime_actions WHERE id = ? AND project_id = ?
+    `, actionId, projectId);
+    if (!action) throw new HarnessError("not_found", "Runtime Action was not found in the current project");
+    const confirmation = this.database.get<{
+      id: string; tree_id: string | null; scope_id: string; prompt: string; prompt_type: string;
+      related_task_node_id: string | null; related_artifact_ids_json: string; options_json: string;
+      status: string; answer: string | null; answer_trace_event_id: string | null; created_at: string; resolved_at: string | null;
+    }>(`
+      SELECT id, tree_id, scope_id, prompt, prompt_type, related_task_node_id,
+             related_artifact_ids_json, options_json, status, answer, answer_trace_event_id, created_at, resolved_at
+      FROM runtime_confirmation_prompts WHERE runtime_action_id = ? AND project_id = ?
+    `, actionId, projectId);
+    const change = this.database.get<UserChangeRow>(
+      "SELECT * FROM user_change_requests WHERE runtime_action_id = ? AND project_id = ?", actionId, projectId,
+    );
+    const drift = action.target_type === "plan_drift" && action.target_id
+      ? this.database.get<DriftRow>(`
+          SELECT id, tree_id, task_node_id, planned_artifact_id, actual_artifact_id, drift_type, severity,
+                 trace_event_id, drift_explanation, agent_recommendation, resolution_status, user_decision,
+                 description, created_at
+          FROM plan_drift_records WHERE id = ? AND project_id = ?
+        `, action.target_id, projectId)
+      : undefined;
+    return {
+      action: {
+        actionId: action.id, actionType: action.action_type, targetType: action.target_type, targetId: action.target_id,
+        expectedRevision: action.expected_revision, reason: action.reason, sourceMessageRef: action.source_message_ref,
+        riskLevel: action.risk_level, confirmationRequirement: action.confirmation_requirement,
+        confirmationId: action.confirmation_prompt_id, status: action.status,
+        input: JSON.parse(action.input_json) as unknown, result: JSON.parse(action.result_json) as unknown,
+        createdAt: action.created_at, committedAt: action.committed_at,
+      },
+      confirmation: confirmation ? {
+        confirmationId: confirmation.id, treeId: confirmation.tree_id, scopeId: confirmation.scope_id,
+        prompt: confirmation.prompt, promptType: confirmation.prompt_type,
+        relatedTaskNodeId: confirmation.related_task_node_id,
+        relatedArtifactIds: JSON.parse(confirmation.related_artifact_ids_json) as string[],
+        options: JSON.parse(confirmation.options_json) as string[], status: confirmation.status,
+        answer: confirmation.answer, answerTraceEventId: confirmation.answer_trace_event_id,
+        createdAt: confirmation.created_at, resolvedAt: confirmation.resolved_at,
+      } : null,
+      userChange: change ? this.mapUserChange(change) : null,
+      planDrift: drift ? this.mapDrift(drift) : null,
+    };
+  }
+
   private requireProject(projectId: string): void {
     if (!this.database.get("SELECT id FROM projects WHERE id = ?", projectId)) throw new HarnessError("not_found", "project was not found");
   }
@@ -363,6 +508,18 @@ export class RuntimeQueryService {
       userDecision: row.user_decision,
       description: row.description,
       createdAt: row.created_at,
+    };
+  }
+
+  private mapUserChange(row: UserChangeRow) {
+    return {
+      userChangeId: row.id, treeId: row.tree_id, nodeId: row.task_node_id, changeType: row.change_type,
+      sourceTraceEventId: row.source_trace_event_id, expectedTreeRevisionId: row.expected_tree_revision_id,
+      summary: row.summary, changeImpact: JSON.parse(row.change_impact_json) as unknown,
+      proposedDocument: row.proposed_document_json ? JSON.parse(row.proposed_document_json) as unknown : null,
+      priorityTargetNodeId: row.priority_target_node_id, priorNodeStatus: row.prior_node_status,
+      status: row.status, runtimeActionId: row.runtime_action_id,
+      createdAt: row.created_at, updatedAt: row.updated_at, resolvedAt: row.resolved_at,
     };
   }
 

@@ -28,6 +28,8 @@ describe("Harness MCP binding", () => {
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
       "harness_get_artifact_graph", "harness_get_artifact_detail", "harness_get_plan_drift_summary",
       "harness_record_plan_drift",
+      "harness_get_waiting_items", "harness_get_user_change_requests", "harness_get_runtime_action_detail",
+      "harness_propose_plan_drift_resolution", "harness_propose_user_change", "harness_resolve_runtime_confirmation",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -37,6 +39,12 @@ describe("Harness MCP binding", () => {
     });
     expect(tools.find((tool) => tool.name === "harness_get_plan_drift_summary")?.inputSchema).toMatchObject({
       properties: { severity: { enum: ["info", "warning", "blocking"] }, resolutionStatus: { enum: expect.any(Array) } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_propose_user_change")?.inputSchema).toMatchObject({
+      properties: { changeType: { enum: ["minor_change", "scope_change", "priority_change"] } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_resolve_runtime_confirmation")?.inputSchema).toMatchObject({
+      properties: { answer: { enum: ["yes", "no", "pause"] } },
     });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
@@ -56,6 +64,15 @@ describe("Harness MCP binding", () => {
     expect(driftValue.items).toHaveLength(1);
     const graph = await client.callTool({ name: "harness_get_artifact_graph", arguments: { cwd: project, treeId: createdValue.treeId } });
     expect(graph.isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_waiting_items", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({
+      name: "harness_propose_user_change",
+      arguments: {
+        cwd: project, treeId: createdValue.treeId, expectedTreeRevisionId: "missing", changeType: "minor_change",
+        summary: "Record copy preference", changeImpact: {}, sourceMessageTraceEventId: "missing",
+      },
+    })).isError).toBe(true);
     const snapshot = await client.callTool({ name: "harness_get_runtime_snapshot", arguments: { cwd: project } });
     const content = (snapshot as { content: Array<{ type: string; text?: string }> }).content;
     const parsed = JSON.parse(content[0]?.type === "text" ? content[0].text ?? "null" : "null") as { workflow: { stage: string } };
