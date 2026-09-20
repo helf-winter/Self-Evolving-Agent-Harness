@@ -27,5 +27,7 @@ export function pathsReferToSameProject(left: string, right: string): boolean {
 export interface ProjectView {
   projectId: string;
   canonicalPath: string;
-  status: "persisted" | "new_project" | "identity_conflict";
+  status: "same_project" | "moved_or_renamed" | "copy_detected" | "new_project" | "identity_conflict";
+  sourceProjectId?: string;
+  cloneId?: string;
 }

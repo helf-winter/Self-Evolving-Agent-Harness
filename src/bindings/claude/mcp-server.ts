@@ -60,9 +60,12 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     return project;
   };
   const existingProject = async (cwd?: string) => {
-    const project = await runtime.projects.resolve(useCwd(cwd), "inspect");
+    let project = await runtime.projects.resolve(useCwd(cwd), "inspect");
     if (project.status === "new_project") throw new HarnessError("project_not_registered", "current directory has no Harness project");
     if (project.status === "identity_conflict") throw new HarnessError("project_identity_conflict", "project marker conflicts with this directory");
+    if (project.status === "copy_detected" || project.status === "moved_or_renamed") {
+      project = await runtime.projects.resolve(useCwd(cwd), "persist");
+    }
     return project;
   };
   const guarded = <T>(handler: () => Promise<T> | T) => Promise.resolve().then(handler).then(result, failure);

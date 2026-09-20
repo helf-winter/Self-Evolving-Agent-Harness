@@ -45,7 +45,7 @@ export class HookIngestionService {
     if (this.database.get("SELECT idempotency_key FROM hook_receipts WHERE idempotency_key = ?", key)) return { recorded: false, reason: "duplicate" };
 
     let project = await this.projects.resolve(event.cwd, "inspect");
-    let workflow = project.status === "persisted"
+    let workflow = project.status === "same_project"
       ? this.database.get<WorkflowContext>(`
           SELECT w.tree_id, w.stage, r.selected_node_id
           FROM workflow_states w
@@ -55,7 +55,8 @@ export class HookIngestionService {
       : undefined;
     const mutation = event.eventName === "PreToolUse" && this.isMutation(event);
     if (!workflow && !mutation) return { recorded: false, reason: "inactive" };
-    if (project.status !== "persisted") project = await this.projects.resolve(event.cwd, "persist");
+    if (project.status !== "same_project") project = await this.projects.resolve(event.cwd, "persist");
+    if (project.status === "identity_conflict") return { recorded: false, reason: "inactive" };
     workflow ??= this.database.get<WorkflowContext>(`
       SELECT w.tree_id, w.stage, r.selected_node_id
       FROM workflow_states w

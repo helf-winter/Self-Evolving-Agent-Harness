@@ -109,8 +109,11 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
 }
 
 async function requireProject(runtime: ReturnType<typeof openRuntime>, cwd: string) {
-  const project = await runtime.projects.resolve(cwd, "inspect");
+  let project = await runtime.projects.resolve(cwd, "inspect");
   if (project.status === "new_project") throw new HarnessError("project_not_registered", "current directory has no Harness project");
   if (project.status === "identity_conflict") throw new HarnessError("project_identity_conflict", "project marker conflicts with this path");
+  if (project.status === "copy_detected" || project.status === "moved_or_renamed") {
+    project = await runtime.projects.resolve(cwd, "persist");
+  }
   return project;
 }
