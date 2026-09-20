@@ -432,4 +432,121 @@ export const migrations: Migration[] = [{
     CREATE INDEX reproduction_validation_revision_idx
       ON reproduction_validation_results(reproduction_revision_id, created_at DESC);
   `,
+}, {
+  version: 7,
+  sql: `
+    CREATE TABLE experiences (
+      id TEXT PRIMARY KEY,
+      source_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      source_tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE RESTRICT,
+      source_task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE RESTRICT,
+      source_task_node_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE RESTRICT,
+      source_success_attempt_id TEXT NOT NULL REFERENCES execution_attempts(id) ON DELETE RESTRICT,
+      source_success_evaluation_id TEXT NOT NULL UNIQUE REFERENCES evaluations(id) ON DELETE RESTRICT,
+      source_failure_attempt_ids_json TEXT NOT NULL,
+      source_failure_evaluation_ids_json TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      applicable_context_json TEXT NOT NULL,
+      verification_json TEXT NOT NULL,
+      related_artifact_ids_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX experience_source_idx ON experiences(source_project_id, source_tree_id, source_task_node_id, created_at DESC);
+
+    CREATE TABLE skills (
+      id TEXT PRIMARY KEY,
+      stable_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      trigger_context_json TEXT NOT NULL,
+      current_candidate_revision_id TEXT,
+      validation_status TEXT NOT NULL CHECK(validation_status IN ('draft', 'frozen', 'validating', 'passed', 'failed', 'promoted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      promoted_at TEXT
+    );
+
+    CREATE TABLE skill_candidate_revisions (
+      id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+      revision_number INTEGER NOT NULL CHECK(revision_number > 0),
+      source_experience_ids_json TEXT NOT NULL,
+      instruction_snapshot TEXT NOT NULL,
+      frozen_at TEXT NOT NULL,
+      validation_status TEXT NOT NULL CHECK(validation_status IN ('frozen', 'validating', 'passed', 'failed', 'promoted')),
+      UNIQUE(skill_id, revision_number)
+    );
+    CREATE INDEX skill_candidate_skill_idx ON skill_candidate_revisions(skill_id, revision_number DESC);
+
+    CREATE TABLE skill_test_cases (
+      id TEXT PRIMARY KEY,
+      skill_candidate_revision_id TEXT NOT NULL REFERENCES skill_candidate_revisions(id) ON DELETE CASCADE,
+      test_type TEXT NOT NULL CHECK(test_type IN ('real_failure_replay', 'variation', 'holdout', 'negative_applicability')),
+      source_refs_json TEXT NOT NULL,
+      target_behavior TEXT NOT NULL,
+      applicable_context_json TEXT NOT NULL,
+      fixture_setup_json TEXT NOT NULL,
+      input_json TEXT NOT NULL,
+      expected_result_json TEXT NOT NULL,
+      oracle_json TEXT NOT NULL,
+      reproduction_command TEXT NOT NULL,
+      timeout_ms INTEGER NOT NULL CHECK(timeout_ms > 0),
+      generated_by TEXT NOT NULL,
+      quality_status TEXT NOT NULL CHECK(quality_status IN ('draft', 'schema_valid', 'reproducible', 'discriminative', 'stable', 'accepted', 'rejected')),
+      leakage_policy TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX skill_test_candidate_idx ON skill_test_cases(skill_candidate_revision_id, test_type, quality_status, created_at DESC);
+
+    CREATE TABLE skill_test_quality_results (
+      id TEXT PRIMARY KEY,
+      skill_test_case_id TEXT NOT NULL REFERENCES skill_test_cases(id) ON DELETE CASCADE,
+      schema_valid INTEGER NOT NULL CHECK(schema_valid IN (0, 1)),
+      fixture_isolated INTEGER NOT NULL CHECK(fixture_isolated IN (0, 1)),
+      failure_reproduced INTEGER NOT NULL CHECK(failure_reproduced IN (0, 1)),
+      oracle_valid INTEGER NOT NULL CHECK(oracle_valid IN (0, 1)),
+      discriminative INTEGER NOT NULL CHECK(discriminative IN (0, 1)),
+      stable INTEGER NOT NULL CHECK(stable IN (0, 1)),
+      split_valid INTEGER NOT NULL CHECK(split_valid IN (0, 1)),
+      evidence_refs_json TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK(verdict IN ('accepted', 'rejected')),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX skill_quality_case_idx ON skill_test_quality_results(skill_test_case_id, created_at DESC);
+
+    CREATE TABLE skill_validation_runs (
+      id TEXT PRIMARY KEY,
+      skill_candidate_revision_id TEXT NOT NULL REFERENCES skill_candidate_revisions(id) ON DELETE CASCADE,
+      skill_test_case_id TEXT NOT NULL REFERENCES skill_test_cases(id) ON DELETE CASCADE,
+      run_mode TEXT NOT NULL CHECK(run_mode IN ('no_skill_baseline', 'skill_enabled')),
+      repetition_index INTEGER NOT NULL CHECK(repetition_index > 0),
+      verdict TEXT NOT NULL CHECK(verdict IN ('passed', 'failed', 'blocked', 'invalid')),
+      token_usage INTEGER CHECK(token_usage IS NULL OR token_usage >= 0),
+      tool_call_count INTEGER CHECK(tool_call_count IS NULL OR tool_call_count >= 0),
+      side_effect_risk TEXT NOT NULL CHECK(side_effect_risk IN ('none', 'low', 'medium', 'high', 'irreversible')),
+      side_effect_summary TEXT NOT NULL,
+      evidence_refs_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(skill_candidate_revision_id, skill_test_case_id, run_mode, repetition_index)
+    );
+    CREATE INDEX skill_run_candidate_idx ON skill_validation_runs(skill_candidate_revision_id, skill_test_case_id, run_mode, repetition_index);
+
+    CREATE TABLE skill_validation_reports (
+      id TEXT PRIMARY KEY,
+      skill_candidate_revision_id TEXT NOT NULL REFERENCES skill_candidate_revisions(id) ON DELETE CASCADE,
+      baseline_summary_json TEXT NOT NULL,
+      enabled_summary_json TEXT NOT NULL,
+      replay_result_json TEXT NOT NULL,
+      holdout_result_json TEXT NOT NULL,
+      negative_applicability_result_json TEXT NOT NULL,
+      stability_result_json TEXT NOT NULL,
+      risk_summary_json TEXT NOT NULL,
+      promotion_verdict TEXT NOT NULL CHECK(promotion_verdict IN ('pass', 'fail', 'uncertain')),
+      rejection_reasons_json TEXT NOT NULL,
+      evidence_refs_json TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX skill_report_candidate_idx ON skill_validation_reports(skill_candidate_revision_id, created_at DESC);
+  `,
 }];

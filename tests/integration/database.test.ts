@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(6);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(7);
     reopened.close();
   });
 
@@ -180,6 +180,33 @@ describe("RuntimeDatabase", () => {
       "SELECT maturity_level, current_reproduction_revision_id FROM failure_cases WHERE id = 'f1'",
     )).toEqual({ maturity_level: "L0_observed", current_reproduction_revision_id: "rr1" });
     expect(reopened.all("SELECT id FROM failure_case_occurrences WHERE failure_case_id = 'f1'")).toHaveLength(1);
+    reopened.close();
+  });
+
+  it("persists constrained Experience, Skill Candidate, test, run, and report records", async () => {
+    const filename = await databasePath();
+    const database = new RuntimeDatabase(filename);
+    expect(database.all<{ name: string }>(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('experiences', 'skills', 'skill_candidate_revisions', 'skill_test_cases',
+                     'skill_test_quality_results', 'skill_validation_runs', 'skill_validation_reports')
+      ORDER BY name
+    `)).toEqual([
+      { name: "experiences" }, { name: "skill_candidate_revisions" }, { name: "skill_test_cases" },
+      { name: "skill_test_quality_results" }, { name: "skill_validation_reports" },
+      { name: "skill_validation_runs" }, { name: "skills" },
+    ]);
+    database.run("INSERT INTO skills (id, stable_key, name, trigger_context_json, validation_status, created_at, updated_at) VALUES ('s1', 'endpoint-repair', 'Endpoint repair', '{}', 'draft', 'now', 'now')");
+    database.run("INSERT INTO skill_candidate_revisions (id, skill_id, revision_number, source_experience_ids_json, instruction_snapshot, frozen_at, validation_status) VALUES ('sc1', 's1', 1, '[]', 'Run focused tests', 'now', 'frozen')");
+    expect(() => database.run("INSERT INTO skill_candidate_revisions (id, skill_id, revision_number, source_experience_ids_json, instruction_snapshot, frozen_at, validation_status) VALUES ('sc2', 's1', 1, '[]', 'Duplicate', 'now', 'frozen')")).toThrow();
+    database.run("INSERT INTO skill_test_cases (id, skill_candidate_revision_id, test_type, source_refs_json, target_behavior, applicable_context_json, fixture_setup_json, input_json, expected_result_json, oracle_json, reproduction_command, timeout_ms, generated_by, quality_status, leakage_policy, created_at) VALUES ('st1', 'sc1', 'real_failure_replay', '[]', 'repair', '{}', '{}', '{}', '{}', '{}', 'npm test', 30000, 'agent', 'accepted', 'source_only', 'now')");
+    database.run("INSERT INTO skill_validation_runs (id, skill_candidate_revision_id, skill_test_case_id, run_mode, repetition_index, verdict, side_effect_risk, side_effect_summary, evidence_refs_json, created_at) VALUES ('sv1', 'sc1', 'st1', 'no_skill_baseline', 1, 'failed', 'none', '', '[]', 'now')");
+    expect(() => database.run("INSERT INTO skill_validation_runs (id, skill_candidate_revision_id, skill_test_case_id, run_mode, repetition_index, verdict, side_effect_risk, side_effect_summary, evidence_refs_json, created_at) VALUES ('sv2', 'sc1', 'st1', 'no_skill_baseline', 1, 'failed', 'none', '', '[]', 'now')")).toThrow();
+    expect(() => database.run("INSERT INTO skill_test_cases (id, skill_candidate_revision_id, test_type, source_refs_json, target_behavior, applicable_context_json, fixture_setup_json, input_json, expected_result_json, oracle_json, reproduction_command, timeout_ms, generated_by, quality_status, leakage_policy, created_at) VALUES ('bad', 'sc1', 'unknown', '[]', 'bad', '{}', '{}', '{}', '{}', '{}', 'x', 1, 'agent', 'draft', 'x', 'now')")).toThrow();
+    database.close();
+    const reopened = new RuntimeDatabase(filename);
+    expect(reopened.get<{ instruction_snapshot: string }>("SELECT instruction_snapshot FROM skill_candidate_revisions WHERE id = 'sc1'"))
+      .toEqual({ instruction_snapshot: "Run focused tests" });
     reopened.close();
   });
 });
