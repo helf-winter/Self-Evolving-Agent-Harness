@@ -915,4 +915,63 @@ export const migrations: Migration[] = [{
     CREATE INDEX runtime_plugin_effect_disposal_idx
       ON runtime_plugin_effect_disposals(plugin_effect_id, created_at DESC);
   `,
+}, {
+  version: 11,
+  sql: `
+    CREATE TABLE draft_change_set_previews (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      base_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      proposed_document_hash TEXT NOT NULL,
+      proposed_document_json TEXT NOT NULL,
+      impact_json TEXT NOT NULL,
+      apply_mode TEXT NOT NULL CHECK(apply_mode IN ('direct', 'preview_required')),
+      status TEXT NOT NULL CHECK(status IN ('active', 'applied', 'stale', 'cancelled')),
+      created_at TEXT NOT NULL,
+      applied_at TEXT
+    );
+    CREATE INDEX draft_change_set_preview_scope_idx
+      ON draft_change_set_previews(project_id, tree_id, base_revision_id, status, created_at DESC);
+
+    ALTER TABLE draft_change_sets ADD COLUMN project_id TEXT REFERENCES projects(id) ON DELETE CASCADE;
+    ALTER TABLE draft_change_sets ADD COLUMN result_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL;
+    ALTER TABLE draft_change_sets ADD COLUMN source_message_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE RESTRICT;
+    ALTER TABLE draft_change_sets ADD COLUMN affected_node_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE draft_change_sets ADD COLUMN affected_branch_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE draft_change_sets ADD COLUMN affected_artifact_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE draft_change_sets ADD COLUMN affected_relation_refs_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE draft_change_sets ADD COLUMN affected_contract_ids_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE draft_change_sets ADD COLUMN apply_mode TEXT NOT NULL DEFAULT 'direct'
+      CHECK(apply_mode IN ('direct', 'preview_required'));
+    ALTER TABLE draft_change_sets ADD COLUMN preview_id TEXT REFERENCES draft_change_set_previews(id) ON DELETE SET NULL;
+    ALTER TABLE draft_change_sets ADD COLUMN planning_decision_id TEXT REFERENCES planning_decisions(id) ON DELETE SET NULL;
+    ALTER TABLE draft_change_sets ADD COLUMN planning_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE SET NULL;
+    CREATE INDEX draft_change_set_scope_idx
+      ON draft_change_sets(project_id, tree_id, created_at DESC);
+
+    ALTER TABLE planning_decisions ADD COLUMN base_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL;
+    ALTER TABLE planning_decisions ADD COLUMN result_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE SET NULL;
+    ALTER TABLE planning_decisions ADD COLUMN change_set_id TEXT REFERENCES draft_change_sets(id) ON DELETE SET NULL;
+    ALTER TABLE planning_decisions ADD COLUMN discussion_topic TEXT;
+    ALTER TABLE planning_decisions ADD COLUMN current_understanding TEXT;
+    ALTER TABLE planning_decisions ADD COLUMN considered_options_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE planning_decisions ADD COLUMN agent_recommendation TEXT;
+    ALTER TABLE planning_decisions ADD COLUMN user_decision TEXT;
+    ALTER TABLE planning_decisions ADD COLUMN affected_refs_json TEXT NOT NULL DEFAULT '{}';
+    ALTER TABLE planning_decisions ADD COLUMN source_message_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE SET NULL;
+    CREATE INDEX planning_decision_history_idx
+      ON planning_decisions(tree_id, created_at DESC);
+
+    ALTER TABLE plan_readiness_results ADD COLUMN issues_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE plan_readiness_results ADD COLUMN warnings_json TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE plan_readiness_results ADD COLUMN recommended_issue_json TEXT;
+    ALTER TABLE plan_readiness_results ADD COLUMN priority_policy_version TEXT NOT NULL DEFAULT 'refinement-priority-v1';
+
+    ALTER TABLE skeleton_acceptance_criteria ADD COLUMN branch_task_node_id TEXT REFERENCES task_nodes(id) ON DELETE CASCADE;
+    ALTER TABLE skeleton_acceptance_criteria ADD COLUMN criteria_json TEXT;
+    ALTER TABLE skeleton_acceptance_criteria ADD COLUMN source_planning_revision_id TEXT REFERENCES task_tree_revisions(id) ON DELETE CASCADE;
+    CREATE INDEX skeleton_acceptance_branch_idx
+      ON skeleton_acceptance_criteria(tree_revision_id, branch_task_node_id);
+  `,
 }];
