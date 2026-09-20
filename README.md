@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift，以及 Runtime Action & User Change 五个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change，以及 Failure Case Maturity 六个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
@@ -19,8 +19,10 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Runtime Action 将自然语言意图转换为可校验的结构化状态变更；阻断 Drift Resolution 和 Scope Change 必须绑定明确的确认提示与用户回答 Trace；
 - User Change Request 区分 `minor_change`、`priority_change` 和 `scope_change`，保留来源、影响、状态及关联动作；
 - Scope Change 确认后产生新的 Task Tree 草稿修订并回到精炼阶段，不会直接授权代码执行；
+- 应用后的失败 Evaluation 自动沉淀为 L0 Failure Case；相同结构化签名复用案例，但每次失败 occurrence 独立保留；
+- 结构化复现以不可变 revision 演进，并由独立 Trace 证据确定性推进 L1 manual、L2 assisted、L3 automated 与 L4 regression；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 25 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 29 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -104,6 +106,19 @@ Agent 可按需使用以下 Runtime Tools：
 
 `minor_change` 只记录事实，`priority_change` 只改变当前选中的后续节点；二者不修改 Task Tree revision。`scope_change` 和阻断 Drift Resolution 属于高风险动作，必须确认。确认 Scope Change 只会创建新草稿并回到 Task Tree refinement，仍需重新扫描就绪条件并确认受影响分支后才能执行代码。
 
+### Failure Case 成熟度
+
+当 Lifecycle Transition Policy 真正应用一个 `failed` Evaluation 时，Runtime 自动建立或复用 L0 Failure Case，并保存来源 Task Node、Attempt、Evaluation、Artifact 与证据。Failure Case 不会因为后续修复成功而被删除。
+
+Agent 通过以下工具推进复现成熟度：
+
+- `harness_get_failure_cases`：按 Tree、Node、L0-L4 和可用性状态筛选案例；
+- `harness_get_failure_case_detail`：查看来源、所有 occurrence、复现 revision、验证结果和相关 Artifact；
+- `harness_add_failure_reproduction`：追加 manual、assisted 或 automated 结构化复现契约；
+- `harness_validate_failure_reproduction`：提交独立运行产生的 Trace 证据，并由代码计算允许的最高成熟度。
+
+复现工具只保存声明的 `entryCommand`，不会自行执行任意 shell。生成复现步骤与验证结果必须分离：L3 需要稳定 pre-fix RED、可区分 Oracle、重复稳定和充分隔离；L4 还必须证明 post-fix GREEN。隔离可以使用 fixture、worktree、临时目录或项目原生测试环境，容器不是强制条件。
+
 ### 分支确认链路
 
 Agent 通过 Runtime Tools 执行下列链路：
@@ -140,4 +155,4 @@ npm run check
 claude plugin validate ./plugin
 ```
 
-完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Evolution、失败案例自动晋升、完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Experience / Skill Candidate 的完整 Evolution 与自动晋升、完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。

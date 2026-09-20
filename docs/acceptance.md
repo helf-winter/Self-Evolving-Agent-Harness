@@ -92,16 +92,29 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 额外验证 `no`、`pause`、重复回答、旧 revision、其他 Project 的 ID 和早于提示的回答 Trace：均不得产生跨 Project、重复或部分状态写入。
 
-## 7. 安全检查
+## 7. Failure Case L0-L4
+
+在一个已确认、可执行的 Task Node 上制造一次有明确测试输出的失败：
+
+1. 启动 Attempt、附加失败命令 Trace、进入 verifying 并提交 `failed` Evaluation；确认 `harness_get_failure_cases` 自动返回 L0，且能反查 Node、Attempt 与 Evaluation。
+2. 再次制造相同结构化失败；确认复用同一个 Failure Case，同时 occurrence 数量增加，首次来源不被覆盖。
+3. 使用 `harness_add_failure_reproduction` 添加完整 manual revision；实际执行人工复现并让 Hook 记录证据，再调用 `harness_validate_failure_reproduction`，确认晋升 L1。
+4. 添加 assisted revision 并以新的运行证据验证，确认最高晋升 L2。
+5. 添加 automated revision，声明 entry command、timeout、isolation、失败签名、pre-fix baseline 与重复策略；在隔离环境中取得稳定 RED、Oracle discrimination、重复稳定和 isolation 证据，确认晋升 L3。
+6. 修复后创建新的成功 Attempt，在 post-fix baseline 上取得稳定 GREEN；用 RED 与 GREEN Trace 一起验证同一 automated revision，确认晋升 L4。
+7. 重启 Claude，通过 `harness_get_failure_case_detail` 确认全部 occurrence、不可变 revision、validation result、当前有效 revision 和 L4 状态均保留。
+
+额外验证：缺少 setup/cleanup/Oracle/evidence 的契约被拒绝；跨 Project、早于 revision 的验证证据被拒绝；重复 idempotency key 不产生第二条结果；后续低成熟度验证不能让 L4 降级；`flaky` 等可用性状态不会改变成熟度。
+
+## 8. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-## 8. 当前不作为验收失败的范围
+## 9. 当前不作为验收失败的范围
 
-- Evolution 自动结论与经验晋升；
-- 失败案例 L0-L4 自动化；
+- Experience / Skill Candidate 的完整 Evolution 与自动晋升；
 - Task Node Replacement 与 Effect Disposal；
 - 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；
