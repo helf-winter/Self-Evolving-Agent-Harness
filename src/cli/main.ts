@@ -12,7 +12,10 @@ function positional(args: string[]): string[] {
   const result: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--json") continue;
-    if (args[index] === "--cwd" || args[index] === "--limit" || args[index] === "--cursor") { index += 1; continue; }
+    if ([
+      "--cwd", "--limit", "--cursor", "--status",
+      "--map-limit", "--map-cursor", "--evidence-limit", "--evidence-cursor",
+    ].includes(args[index]!)) { index += 1; continue; }
     result.push(args[index]!);
   }
   return result;
@@ -45,6 +48,32 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
     let result: unknown;
     if (words[0] === "project" && words[1] === "inspect") {
       result = await runtime.projects.resolve(cwd, "inspect");
+    } else if (words[0] === "project" && words[1] === "clones") {
+      const project = await requireProject(runtime, cwd);
+      const direction = words[2];
+      if (direction && !["incoming", "outgoing", "all"].includes(direction)) {
+        throw new HarnessError("invalid_input", "clone direction must be incoming, outgoing, or all");
+      }
+      const status = option(args, "--status");
+      if (status && !["pending", "cloning", "completed", "incomplete", "failed", "recovered"].includes(status)) {
+        throw new HarnessError("invalid_input", "invalid clone status");
+      }
+      const cursor = option(args, "--cursor");
+      result = runtime.queries.getProjectClones(project.projectId, {
+        ...(direction ? { direction: direction as "incoming" | "outgoing" | "all" } : {}),
+        ...(status ? { status: status as "pending" | "cloning" | "completed" | "incomplete" | "failed" | "recovered" } : {}),
+        limit: Number(option(args, "--limit") ?? 50), ...(cursor ? { cursor } : {}),
+      });
+    } else if (words[0] === "project" && words[1] === "clone-detail") {
+      const project = await requireProject(runtime, cwd);
+      const cloneId = words[2];
+      if (!cloneId) throw new HarnessError("invalid_input", "clone ID is required");
+      const mapCursor = option(args, "--map-cursor");
+      const evidenceCursor = option(args, "--evidence-cursor");
+      result = runtime.queries.getProjectCloneDetail(project.projectId, cloneId, {
+        mapLimit: Number(option(args, "--map-limit") ?? 100), ...(mapCursor ? { mapCursor } : {}),
+        evidenceLimit: Number(option(args, "--evidence-limit") ?? 50), ...(evidenceCursor ? { evidenceCursor } : {}),
+      });
     } else if (words[0] === "taskroot") {
       const title = words.slice(1).join(" ").trim();
       const project = await runtime.projects.resolve(cwd, "persist");

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ProjectCloneService } from "../../src/application/project-clone-service.js";
+import { RuntimeQueryService } from "../../src/application/runtime-query-service.js";
 import { TaskTreeService } from "../../src/application/task-tree-service.js";
 import type { TaskTreeDocument } from "../../src/domain/task-tree.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
@@ -111,6 +112,17 @@ describe("ProjectCloneService", () => {
     expect(service.cloneProject({
       sourceProjectId: "source", targetCanonicalPath: "/work/copy", targetDisplayPath: "/work/copy", platform: "linux",
     })).toMatchObject({ created: false, cloneId: cloned.cloneId, targetProjectId: cloned.targetProjectId, status: "completed" });
+    const queries = new RuntimeQueryService(database);
+    expect(queries.getProjectClones("source", { direction: "outgoing" }).items)
+      .toEqual([expect.objectContaining({ cloneId: cloned.cloneId, targetProjectId: cloned.targetProjectId })]);
+    expect(queries.getProjectCloneDetail(cloned.targetProjectId, cloned.cloneId, {})).toMatchObject({
+      clone: { cloneId: cloned.cloneId, sourceProjectId: "source", targetProjectId: cloned.targetProjectId, status: "completed" },
+      entityMaps: expect.arrayContaining([expect.objectContaining({ entityType: "task_tree" })]),
+      inheritedEvidence: [expect.objectContaining({ inheritanceStatus: "needs_revalidation" })],
+    });
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('unrelated', '/work/unrelated', 'now', 'now')");
+    expect(() => queries.getProjectCloneDetail("unrelated", cloned.cloneId, {}))
+      .toThrow(expect.objectContaining({ code: "not_found" }));
     database.close();
   });
 

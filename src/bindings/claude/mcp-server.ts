@@ -70,6 +70,38 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   };
   const guarded = <T>(handler: () => Promise<T> | T) => Promise.resolve().then(handler).then(result, failure);
 
+  server.registerTool("harness_get_project_identity", {
+    description: "Inspect the current directory's deterministic Project identity resolution without exposing its identity token.",
+    inputSchema: { cwd: cwdSchema },
+  }, ({ cwd }) => guarded(async () => runtime.projects.resolve(useCwd(cwd), "inspect")));
+
+  server.registerTool("harness_get_project_clones", {
+    description: "List incoming or outgoing Project Clone provenance visible from the current Project.",
+    inputSchema: {
+      cwd: cwdSchema, direction: z.enum(["incoming", "outgoing", "all"]).optional(),
+      status: z.enum(["pending", "cloning", "completed", "incomplete", "failed", "recovered"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, direction, status, limit, cursor }) => guarded(async () => runtime.queries.getProjectClones(
+    (await existingProject(cwd)).projectId,
+    { ...(direction ? { direction } : {}), ...(status ? { status } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_project_clone_detail", {
+    description: "Get one Project Clone's provenance, rewritten entity maps, and inherited evidence with independent pagination.",
+    inputSchema: {
+      cwd: cwdSchema, cloneId: z.string().min(1),
+      mapLimit: z.number().int().min(1).max(200).optional(), mapCursor: z.string().optional(),
+      evidenceLimit: z.number().int().min(1).max(200).optional(), evidenceCursor: z.string().optional(),
+    },
+  }, ({ cwd, cloneId, mapLimit, mapCursor, evidenceLimit, evidenceCursor }) => guarded(async () => runtime.queries.getProjectCloneDetail(
+    (await existingProject(cwd)).projectId, cloneId,
+    {
+      ...(mapLimit ? { mapLimit } : {}), ...(mapCursor ? { mapCursor } : {}),
+      ...(evidenceLimit ? { evidenceLimit } : {}), ...(evidenceCursor ? { evidenceCursor } : {}),
+    },
+  )));
+
   server.registerTool("harness_get_runtime_snapshot", {
     description: "Get compact Harness runtime state for the current project.", inputSchema: { cwd: cwdSchema },
   }, ({ cwd }) => guarded(async () => runtime.queries.getRuntimeSnapshot((await existingProject(cwd)).projectId)));

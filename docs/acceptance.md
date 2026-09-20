@@ -30,6 +30,33 @@ harness tree candidates --json
 
 预期：inspect 返回 `new_project` 且不写 marker；taskroot 后创建 marker；Project B 看不到 Project A 的树。
 
+继续验证移动与复制语义：
+
+```bash
+cp -a /tmp/harness-project-a /tmp/harness-project-a-copy
+cd /tmp/harness-project-a-copy
+harness project inspect --json
+harness tree snapshot --json
+harness project clones incoming --json
+
+mkdir -p /tmp/harness-project-move-source
+cd /tmp/harness-project-move-source
+harness taskroot 'Move-safe task' --json
+cd /tmp
+mv harness-project-move-source harness-project-move-target
+cd /tmp/harness-project-move-target
+harness project inspect --json
+harness tree snapshot --json
+```
+
+预期：
+
+- 副本首次 inspect 返回 `copy_detected` 且仍指明源 Project；读取 Runtime Snapshot 时创建独立目标 Project 并原子改写副本 marker；
+- `project clones incoming` 返回 `completed` Clone Record，可用 `harness project clone-detail CLONE_ID --json` 查看实体映射与继承证据；
+- 副本继承 Task Tree 与 Artifact Graph，但 Artifact 回到 planned、活动节点暂停、成功证据要求重新验证；
+- 副本中没有源 Project 的 Trace、Attempt 或 Evaluation；源和副本后续修改互不影响；
+- 移动后的目录首次 inspect 返回 `moved_or_renamed`，Snapshot 持久化新主路径，重启后返回 `same_project` 且保留原 Task Tree。
+
 ## 3. Claude 插件
 
 ```bash
@@ -139,11 +166,11 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
-- 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
+- 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
+- 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
 ## 11. 当前不作为验收失败的范围
 
-- 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
 - 图形界面。

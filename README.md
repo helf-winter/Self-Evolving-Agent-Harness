@@ -2,10 +2,10 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution，以及 Task Node Replacement & Effect Disposal 八个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal，以及 Project Identity & Clone 九个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
-- 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
+- token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
 - Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
 - 规划、版本绑定的分支确认、Skeleton、实现和验证工作流状态；
 - 分支确认记录不可变；节点确认状态与执行状态分离，支持 `draft`、`pending_user_confirmation`、`confirmed`、`partial_confirmed`；
@@ -26,8 +26,10 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Validation Report 由代码聚合覆盖率、基线区分度、稳定性、负面适用性与副作用风险，全部硬门禁通过后自动晋升 Skill；
 - Task Node Effect 绑定精确 revision，并按 reversible、version-reversible、compensatable、irreversible 分类；
 - Task Node Replacement 通过不可变候选、契约差异、依赖影响闭包、逆序挂起、证据化 Effect 处置、原子激活和失败恢复推进；
+- 目录复制会创建独立 Project，重写 Task Tree、Artifact 与 Contract 引用，保留 Clone provenance，但不会把源 Trace、Attempt 或 Evaluation 冒充为目标执行事实；
+- Clone 后运行时暂停在重新验证阶段；源项目和目标项目使用不同 marker 与 `project_id`，可独立继续演进；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 44 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 47 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -84,6 +86,18 @@ harness node evaluate ATTEMPT_ID succeeded
 ```
 
 `evaluate ... succeeded` 只是提出成功结论。Runtime 会核对当前修订、所需证据、依赖节点与子节点状态；条件不完整时会把 Evaluation 记录为 `uncertain`，不会把节点标成成功。
+
+### Project Identity 与 Clone
+
+Project Runtime Records 统一存放在公共数据库中，项目目录只保存 `.agent-harness-project.json` 最小身份 marker。路径用于隔离与展示，稳定 `project_id` 用于识别目录移动、重命名和复制：
+
+- 原路径已经不存在时，新的 marker 所在路径被判定为 `moved_or_renamed`，持久化操作会更新主路径并保留路径历史；
+- 原路径仍存在时，新的路径被判定为 `copy_detected`；第一次需要 Runtime 状态的操作会事务化创建独立 Project、改写副本 marker，并克隆允许继承的工程记忆；
+- 无效 marker、未知 Project 或 token 不匹配返回 `identity_conflict`，不会静默共享状态；
+- `harness project inspect` 和 `harness_get_project_identity` 只检查，不创建或改写身份；
+- `harness project clones [incoming|outgoing|all]`、`harness project clone-detail CLONE_ID`、`harness_get_project_clones` 和 `harness_get_project_clone_detail` 用于审计来源、实体 ID 映射与继承证据。
+
+Clone 继承 Task Tree、不可变修订、Artifact Graph、Contract 和确认投影；目标 Artifact 回到 planned，运行中节点暂停，成功节点重新验证。源 Trace、Attempt 与 Evaluation 不会复制到目标项目，历史 Evaluation 只以明确的 `inherited_from_clone` provenance 保存。
 
 ### Artifact Graph 与 Plan Drift
 
@@ -190,4 +204,4 @@ npm run check
 claude plugin validate ./plugin
 ```
 
-完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含项目 Clone/迁移自动改写、Codex Binding 和图形界面。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含完整 AST/符号调用图、Codex Binding 和图形界面。

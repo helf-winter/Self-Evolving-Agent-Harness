@@ -40,6 +40,7 @@ describe("Harness MCP binding", () => {
       "harness_preview_task_node_replacement", "harness_confirm_task_node_replacement",
       "harness_execute_task_node_replacement", "harness_recover_task_node_replacement",
       "harness_get_task_node_replacements", "harness_get_task_node_replacement_detail",
+      "harness_get_project_identity", "harness_get_project_clones", "harness_get_project_clone_detail",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -98,6 +99,8 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_skill_evolution_candidates", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_task_node_effects", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_task_node_replacements", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_project_identity", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_project_clones", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {

@@ -889,6 +889,92 @@ export class RuntimeQueryService {
     };
   }
 
+  getProjectClones(projectId: string, query: {
+    direction?: "incoming" | "outgoing" | "all";
+    status?: "pending" | "cloning" | "completed" | "incomplete" | "failed" | "recovered";
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const direction = query.direction ?? "all";
+    const scope = direction === "incoming" ? "c.target_project_id = ?"
+      : direction === "outgoing" ? "c.source_project_id = ?"
+        : "(c.source_project_id = ? OR c.target_project_id = ?)";
+    const params: Array<string | number> = direction === "all" ? [projectId, projectId] : [projectId];
+    const statusFilter = query.status ? " AND c.status = ?" : "";
+    if (query.status) params.push(query.status);
+    const rows = this.database.all<{
+      id: string; source_project_id: string; target_project_id: string; source_path: string; target_path: string;
+      cloned_entity_counts_json: string; provenance_policy_json: string; status: string;
+      error_summary: string | null; created_at: string; completed_at: string | null;
+    }>(`SELECT c.* FROM project_clone_records c WHERE ${scope}${statusFilter}
+        ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?`, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => this.mapProjectClone(row)),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getProjectCloneDetail(projectId: string, cloneId: string, query: {
+    mapLimit?: number; mapCursor?: string; evidenceLimit?: number; evidenceCursor?: string;
+  }) {
+    this.requireProject(projectId);
+    const clone = this.database.get<{
+      id: string; source_project_id: string; target_project_id: string; source_path: string; target_path: string;
+      cloned_entity_counts_json: string; provenance_policy_json: string; status: string;
+      error_summary: string | null; created_at: string; completed_at: string | null;
+    }>(`SELECT * FROM project_clone_records WHERE id = ?
+        AND (source_project_id = ? OR target_project_id = ?)`, cloneId, projectId, projectId);
+    if (!clone) throw new HarnessError("not_found", "Project Clone Record was not found in the current Project scope");
+    const mapLimit = Math.min(Math.max(query.mapLimit ?? 100, 1), 200);
+    const mapOffset = decodeCursor(query.mapCursor);
+    const maps = this.database.all<{
+      entity_type: string; source_entity_id: string; target_entity_id: string; created_at: string;
+    }>(`SELECT entity_type, source_entity_id, target_entity_id, created_at
+        FROM project_clone_entity_maps WHERE clone_id = ?
+        ORDER BY entity_type, source_entity_id LIMIT ? OFFSET ?`, cloneId, mapLimit + 1, mapOffset);
+    const evidenceLimit = Math.min(Math.max(query.evidenceLimit ?? 50, 1), 200);
+    const evidenceOffset = decodeCursor(query.evidenceCursor);
+    const evidence = this.database.all<{
+      id: string; evidence_kind: string; source_entity_id: string; target_entity_id: string | null;
+      inheritance_status: string; metadata_json: string; created_at: string;
+    }>(`SELECT id, evidence_kind, source_entity_id, target_entity_id, inheritance_status, metadata_json, created_at
+        FROM project_clone_inherited_evidence WHERE clone_id = ?
+        ORDER BY created_at, id LIMIT ? OFFSET ?`, cloneId, evidenceLimit + 1, evidenceOffset);
+    return {
+      clone: this.mapProjectClone(clone),
+      entityMaps: maps.slice(0, mapLimit).map((row) => ({
+        entityType: row.entity_type, sourceEntityId: row.source_entity_id,
+        targetEntityId: row.target_entity_id, createdAt: row.created_at,
+      })),
+      entityMapNextCursor: maps.length > mapLimit ? encodeCursor(mapOffset + mapLimit) : null,
+      inheritedEvidence: evidence.slice(0, evidenceLimit).map((row) => ({
+        inheritedEvidenceId: row.id, evidenceKind: row.evidence_kind,
+        sourceEntityId: row.source_entity_id, targetEntityId: row.target_entity_id,
+        inheritanceStatus: row.inheritance_status,
+        metadata: JSON.parse(row.metadata_json) as unknown, createdAt: row.created_at,
+      })),
+      evidenceNextCursor: evidence.length > evidenceLimit ? encodeCursor(evidenceOffset + evidenceLimit) : null,
+    };
+  }
+
+  private mapProjectClone(row: {
+    id: string; source_project_id: string; target_project_id: string; source_path: string; target_path: string;
+    cloned_entity_counts_json: string; provenance_policy_json: string; status: string;
+    error_summary: string | null; created_at: string; completed_at: string | null;
+  }) {
+    return {
+      cloneId: row.id, sourceProjectId: row.source_project_id, targetProjectId: row.target_project_id,
+      sourcePath: row.source_path, targetPath: row.target_path,
+      entityCounts: JSON.parse(row.cloned_entity_counts_json) as unknown,
+      provenancePolicy: JSON.parse(row.provenance_policy_json) as unknown,
+      status: row.status, errorSummary: row.error_summary,
+      createdAt: row.created_at, completedAt: row.completed_at,
+    };
+  }
+
   private requireProject(projectId: string): void {
     if (!this.database.get("SELECT id FROM projects WHERE id = ?", projectId)) throw new HarnessError("not_found", "project was not found");
   }
