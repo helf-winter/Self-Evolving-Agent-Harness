@@ -40,6 +40,9 @@ async function fixture() {
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('foreign', 'p2', NULL, NULL, 's', 'PostToolUse', '{}', '2030', 'foreign')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('request', 'p1', 't1', 'n1', 's', 'UserPromptSubmit', '{}', '2031', 'request')");
   database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('answer', 'p1', 't1', 'n1', 's', 'UserPromptSubmit', '{}', '2032', 'answer')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('dispose', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2033', 'dispose')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('activate', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2034', 'activate')");
+  database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('recover', 'p1', 't1', 'n1', 's', 'PostToolUse', '{}', '2035', 'recover')");
   return { database, service: new ReplacementService(database) };
 }
 
@@ -142,6 +145,96 @@ describe("ReplacementService Effect Registry", () => {
       projectId: "p1", replacementId: preview.replacementId, answer: "no", answerTraceEventId: "answer",
     })).toMatchObject({ status: "rolled_back", suspendedNodeIds: [] });
     expect(database.all("SELECT id FROM task_node_composition_transitions")).toHaveLength(0);
+    database.close();
+  });
+
+  it("disposes safe Effects, activates a new immutable Tree revision, and revalidates dependents", async () => {
+    const { database, service } = await fixture();
+    const effect = service.registerTaskNodeEffect({
+      projectId: "p1", ownerRevisionId: "nr1", effectType: "version_reversible",
+      targetRef: "artifact:file1", operation: "modify provider", baselineRef: "hash:current",
+      inverseOperation: "restore provider", compensationOperation: null, evidenceRefs: ["trace-n1"],
+    });
+    const preview = service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "tr1",
+      candidateBody: { id: "n1", parentId: null, title: "Provider v2", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [],
+      reason: "Replace provider", sourceMessageTraceEventId: "request",
+    });
+    service.confirmTaskNodeReplacement({ projectId: "p1", replacementId: preview.replacementId, answer: "yes", answerTraceEventId: "answer" });
+    const executed = service.executeTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId,
+      dispositions: [{
+        effectId: effect.effectId, action: "inverse_applied", observedBaselineRef: "hash:current",
+        evidenceRefs: ["dispose"], residualImpact: "",
+      }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["activate"],
+    });
+    expect(executed).toMatchObject({ status: "completed", activationVerdict: "succeeded" });
+    expect(executed.activatedTreeRevisionId).not.toBe("tr1");
+    expect(database.get<{ title: string }>("SELECT title FROM task_nodes WHERE id = 'n1'")).toEqual({ title: "Provider v2" });
+    expect(database.get<{ disposal_status: string }>("SELECT disposal_status FROM task_node_effects WHERE id = ?", effect.effectId))
+      .toEqual({ disposal_status: "disposed" });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n2'")).toEqual({ status: "needs_revalidation" });
+    expect(database.get<{ composition_state: string }>("SELECT composition_state FROM task_node_composition_states WHERE task_node_id = 'n2'"))
+      .toEqual({ composition_state: "active" });
+    const activeRevision = database.get<{ id: string }>("SELECT nr.id FROM task_node_revisions nr JOIN task_trees t ON t.current_revision_id = nr.tree_revision_id WHERE nr.node_id = 'n1' AND t.id = 't1'")!;
+    expect(database.get<{ provides_contract_ids_json: string }>("SELECT provides_contract_ids_json FROM task_node_revision_contract_bindings WHERE task_node_revision_id = ?", activeRevision.id))
+      .toEqual({ provides_contract_ids_json: '["api-contract"]' });
+    expect(database.get("SELECT id FROM task_node_revisions WHERE id = 'nr1'")).toBeTruthy();
+    database.close();
+  });
+
+  it("persists shared-target conflicts without partially activating the candidate", async () => {
+    const { database, service } = await fixture();
+    const effect = service.registerTaskNodeEffect({
+      projectId: "p1", ownerRevisionId: "nr1", effectType: "version_reversible",
+      targetRef: "artifact:file1", operation: "modify provider", baselineRef: "hash:current",
+      inverseOperation: "restore provider", compensationOperation: null, evidenceRefs: ["trace-n1"],
+    });
+    service.registerTaskNodeEffect({
+      projectId: "p1", ownerRevisionId: "nr2", effectType: "version_reversible",
+      targetRef: "artifact:file1", operation: "modify consumer", baselineRef: "hash:current",
+      inverseOperation: "restore consumer", compensationOperation: null, evidenceRefs: ["trace-n2"],
+    });
+    const preview = service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "tr1",
+      candidateBody: { id: "n1", parentId: null, title: "Provider v2", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [], reason: "Replace", sourceMessageTraceEventId: "request",
+    });
+    service.confirmTaskNodeReplacement({ projectId: "p1", replacementId: preview.replacementId, answer: "yes", answerTraceEventId: "answer" });
+    expect(service.executeTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId,
+      dispositions: [{ effectId: effect.effectId, action: "inverse_applied", observedBaselineRef: "hash:current", evidenceRefs: ["dispose"], residualImpact: "shared file" }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["activate"],
+    })).toMatchObject({ status: "disposing", blockedEffectIds: [effect.effectId] });
+    expect(database.get<{ current_revision_id: string }>("SELECT current_revision_id FROM task_trees WHERE id = 't1'"))
+      .toEqual({ current_revision_id: "tr1" });
+    expect(database.get<{ disposal_status: string }>("SELECT disposal_status FROM effect_disposal_results WHERE replacement_id = ?", preview.replacementId))
+      .toEqual({ disposal_status: "conflict" });
+    database.close();
+  });
+
+  it("keeps the old revision on activation failure and recovers suspended state with new evidence", async () => {
+    const { database, service } = await fixture();
+    const preview = service.previewTaskNodeReplacement({
+      projectId: "p1", treeId: "t1", nodeId: "n1", expectedTreeRevisionId: "tr1",
+      candidateBody: { id: "n1", parentId: null, title: "Broken candidate", children: ["n2"] },
+      providesContractIds: ["api-contract"], requiresContractIds: [], reason: "Try candidate", sourceMessageTraceEventId: "request",
+    });
+    service.confirmTaskNodeReplacement({ projectId: "p1", replacementId: preview.replacementId, answer: "yes", answerTraceEventId: "answer" });
+    expect(service.executeTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId, dispositions: [],
+      activationVerdict: "failed", activationEvidenceRefs: ["activate"],
+    })).toMatchObject({ status: "replacement_failed", activatedTreeRevisionId: null });
+    expect(database.get<{ current_revision_id: string }>("SELECT current_revision_id FROM task_trees WHERE id = 't1'"))
+      .toEqual({ current_revision_id: "tr1" });
+    expect(service.recoverTaskNodeReplacement({
+      projectId: "p1", replacementId: preview.replacementId, recoveryVerdict: "restored", evidenceRefs: ["recover"],
+    })).toMatchObject({ status: "rolled_back", restored: true });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n1'")).toEqual({ status: "succeeded" });
+    expect(database.all<{ composition_state: string }>("SELECT composition_state FROM task_node_composition_states ORDER BY task_node_id"))
+      .toEqual([{ composition_state: "active" }, { composition_state: "active" }]);
     database.close();
   });
 });
