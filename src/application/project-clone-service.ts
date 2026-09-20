@@ -210,12 +210,22 @@ export class ProjectCloneService {
       const body = this.database.get<{ body_json: string }>("SELECT body_json FROM task_node_revisions WHERE id = ?", targetRevisionId)!;
       this.database.run("INSERT INTO leaf_task_contracts (node_revision_id, contract_json) VALUES (?, ?)", targetRevisionId, body.body_json);
     }
-    for (const row of this.database.all<{ tree_revision_id: string; criterion: string }>(`
-      SELECT s.tree_revision_id, s.criterion FROM skeleton_acceptance_criteria s
+    for (const row of this.database.all<{ id: string; tree_revision_id: string; criterion: string; criteria_json: string | null }>(`
+      SELECT s.id, s.tree_revision_id, s.criterion, s.criteria_json FROM skeleton_acceptance_criteria s
       JOIN task_tree_revisions r ON r.id = s.tree_revision_id JOIN task_trees t ON t.id = r.tree_id
       WHERE t.project_id = ?`, input.sourceProjectId)) {
-      this.database.run("INSERT INTO skeleton_acceptance_criteria (id, tree_revision_id, criterion, satisfied, evidence_trace_id) VALUES (?, ?, ?, 0, NULL)",
-        newId(), maps.revisions.get(row.tree_revision_id)!, row.criterion);
+      const rewrittenCriterion = row.criteria_json
+        ? input.rewrittenDocuments.get(row.tree_revision_id)?.skeletonCriteria?.find((criterion) =>
+          criterion.id === (JSON.parse(row.criteria_json!) as { id: string }).id)
+        : undefined;
+      const targetRevisionId = maps.revisions.get(row.tree_revision_id)!;
+      this.database.run(`
+        INSERT INTO skeleton_acceptance_criteria (
+          id, tree_revision_id, criterion, satisfied, evidence_trace_id,
+          branch_task_node_id, criteria_json, source_planning_revision_id
+        ) VALUES (?, ?, ?, 0, NULL, ?, ?, ?)
+      `, newId(), targetRevisionId, row.criterion, rewrittenCriterion?.branchNodeId ?? null,
+      rewrittenCriterion ? canonicalJson(rewrittenCriterion) : null, targetRevisionId);
     }
     for (const row of this.database.all<{ tree_revision_id: string; from_node_id: string; to_node_id: string; kind: string; artifact_id: string | null }>(`
       SELECT e.tree_revision_id, e.from_node_id, e.to_node_id, e.kind, e.artifact_id

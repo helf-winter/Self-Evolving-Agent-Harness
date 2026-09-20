@@ -2,11 +2,13 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone，以及 Plugin Composition Contract 十个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract，以及 Task Tree Refinement Loop 十一个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
 - Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
+- 允许保存不完整但结构合法的规划草案；按 tree/branch 范围执行确定性 Plan Readiness、问题优先级和语义警告；
+- 局部 refinement 可直接应用，跨分支 refinement 必须先持久化影响预览；成功应用原子绑定用户消息 Trace、Draft Change Set、Decision Record、planning Trace、新 revision 与 Skeleton 投影；
 - 规划、版本绑定的分支确认、Skeleton、实现和验证工作流状态；
 - 分支确认记录不可变；节点确认状态与执行状态分离，支持 `draft`、`pending_user_confirmation`、`confirmed`、`partial_confirmed`；
 - 修改一个已确认分支时，仅该分支重新确认，未变化兄弟分支保留确认；跨分支依赖未确认时节点处于 `blocked_by_unconfirmed_dependency`；
@@ -31,7 +33,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Runtime Plugin 使用稳定 ID 和不可变 revision，通过精确 provides/requires contract、固定点依赖协调与 composition state 实现空间组合；
 - Plugin registration 和 Effect 由 revision 生命周期拥有；替换/卸载只接受证据化 disposition，并支持影响闭包、冲突重试、失败恢复和 provider 恢复后的依赖重激活；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 57 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 60 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -114,6 +116,19 @@ Plugin Composition 是 Harness 数据目录级的运行时能力注册表，不�
 - `harness_dispose_plugin`、`harness_reactivate_plugin`：证据化卸载/重载，并向依赖者传播 provider 消失与恢复。
 
 manifest 中的 disposer、inverse 和 compensation 字符串只是 Binding 声明。Harness 永远不会把它们当成 shell、JavaScript、MCP 或回调直接执行。`plugin-composition` Skill 指导 Agent 先由目标 Binding 真正完成动作、取得证据，再提交 Runtime 状态。
+
+### Task Tree Refinement Loop
+
+`task-tree-planning` Skill 把需求讨论组织成可恢复的规划循环，而不是要求用户一次确认粗略初稿：
+
+1. `harness_save_draft_revision` 保存结构合法的中间草案；未决问题和不完整 Leaf Contract 可以继续存在。
+2. `harness_scan_plan_readiness` 按整棵树或指定分支返回 blocking issues、warnings 和代码确定的 `recommendedNextIssue`。
+3. Agent 围绕一个问题与用户讨论；用户可以随时改为其他分支。真正结构变化前，用 `harness_get_trace_events` 找到对应的 `UserPromptSubmit` 事实。
+4. `harness_preview_draft_change_set` 计算节点、分支、Artifact、Relation 与 Contract 影响；跨分支变化必须持有匹配当前 base revision 和文档 hash 的 active preview。
+5. `harness_apply_draft_change_set` 提交可展示的选项、建议和用户决定。Runtime 在一个事务中写入 Change Set、Decision Record、planning Trace、新 revision 与 Skeleton Acceptance Criteria；无结构变化不会产生 revision。
+6. `harness_get_task_refinement_history` 和 `harness_get_planning_decision_detail` 分页恢复历史决定，无需重放完整聊天记录。
+
+只有目标范围的 Plan Readiness 通过后才能进入分支确认；兄弟分支自身的问题不会阻塞一个已经就绪的分支。Decision Record 不保存隐藏思维链或底层模型完整请求/响应。
 
 ### Artifact Graph 与 Plan Drift
 

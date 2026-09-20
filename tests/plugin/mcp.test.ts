@@ -44,9 +44,17 @@ describe("Harness MCP binding", () => {
       "harness_register_plugin_revision", "harness_reconcile_plugins", "harness_get_plugins", "harness_get_plugin_detail",
       "harness_preview_plugin_replacement", "harness_execute_plugin_replacement", "harness_recover_plugin_replacement",
       "harness_get_plugin_replacement_detail", "harness_dispose_plugin", "harness_reactivate_plugin",
+      "harness_preview_draft_change_set", "harness_get_task_refinement_history", "harness_get_planning_decision_detail",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_apply_draft_change_set")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["sourceUserMessageTraceEventId", "decision"]),
+      properties: { previewId: { type: "string" }, decision: { type: "object" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_get_task_refinement_history")?.inputSchema).toMatchObject({
+      properties: { treeId: { type: "string" }, limit: { type: "integer" } },
     });
     expect(tools.find((tool) => tool.name === "harness_create_confirmation_prompt")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" }, readinessResultId: { type: "string" } },

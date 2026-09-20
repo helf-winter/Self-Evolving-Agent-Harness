@@ -985,6 +985,103 @@ export class RuntimeQueryService {
     }
   }
 
+  getTaskRefinementHistory(projectId: string, treeId: string, query: { limit?: number; cursor?: string }) {
+    this.requireProject(projectId);
+    this.requireTree(projectId, treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const rows = this.database.all<{
+      decision_id: string; change_set_id: string; base_revision_id: string; result_revision_id: string;
+      discussion_topic: string; current_understanding: string; considered_options_json: string;
+      agent_recommendation: string; user_decision: string; affected_refs_json: string;
+      source_message_trace_event_id: string; trace_event_id: string; created_at: string;
+      apply_mode: string; preview_id: string | null; planning_trace_event_id: string;
+    }>(`
+      SELECT d.id AS decision_id, d.change_set_id, d.base_revision_id, d.result_revision_id,
+             d.discussion_topic, d.current_understanding, d.considered_options_json,
+             d.agent_recommendation, d.user_decision, d.affected_refs_json,
+             d.source_message_trace_event_id, d.trace_event_id, d.created_at,
+             cs.apply_mode, cs.preview_id, cs.planning_trace_event_id
+      FROM planning_decisions d
+      JOIN task_trees t ON t.id = d.tree_id
+      JOIN draft_change_sets cs ON cs.id = d.change_set_id
+      WHERE t.project_id = ? AND d.tree_id = ? AND d.kind = 'task_tree_refinement'
+      ORDER BY d.created_at DESC, d.id DESC LIMIT ? OFFSET ?
+    `, projectId, treeId, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        decisionId: row.decision_id, changeSetId: row.change_set_id,
+        baseRevisionId: row.base_revision_id, resultRevisionId: row.result_revision_id,
+        discussionTopic: row.discussion_topic, currentUnderstanding: row.current_understanding,
+        consideredOptions: JSON.parse(row.considered_options_json) as string[],
+        agentRecommendation: row.agent_recommendation, userDecision: row.user_decision,
+        affectedRefs: JSON.parse(row.affected_refs_json) as unknown,
+        sourceUserMessageTraceEventId: row.source_message_trace_event_id,
+        planningTraceEventId: row.planning_trace_event_id ?? row.trace_event_id,
+        applyMode: row.apply_mode, previewId: row.preview_id, createdAt: row.created_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getPlanningDecisionDetail(projectId: string, decisionId: string) {
+    this.requireProject(projectId);
+    const row = this.database.get<{
+      tree_id: string; decision_id: string; change_set_id: string; base_revision_id: string; result_revision_id: string;
+      discussion_topic: string; current_understanding: string; considered_options_json: string;
+      agent_recommendation: string; user_decision: string; affected_refs_json: string;
+      source_message_trace_event_id: string; trace_event_id: string; created_at: string;
+      operations_json: string; affected_node_ids_json: string; affected_branch_ids_json: string;
+      affected_artifact_ids_json: string; affected_relation_refs_json: string; affected_contract_ids_json: string;
+      apply_mode: string; preview_id: string | null; planning_trace_event_id: string; decision_summary: string;
+    }>(`
+      SELECT d.tree_id, d.id AS decision_id, d.change_set_id, d.base_revision_id, d.result_revision_id,
+             d.discussion_topic, d.current_understanding, d.considered_options_json,
+             d.agent_recommendation, d.user_decision, d.affected_refs_json,
+             d.source_message_trace_event_id, d.trace_event_id, d.created_at,
+             cs.operations_json, cs.affected_node_ids_json, cs.affected_branch_ids_json,
+             cs.affected_artifact_ids_json, cs.affected_relation_refs_json, cs.affected_contract_ids_json,
+             cs.apply_mode, cs.preview_id, cs.planning_trace_event_id, cs.decision_summary
+      FROM planning_decisions d
+      JOIN task_trees t ON t.id = d.tree_id
+      JOIN draft_change_sets cs ON cs.id = d.change_set_id
+      WHERE d.id = ? AND t.project_id = ? AND d.kind = 'task_tree_refinement'
+    `, decisionId, projectId);
+    if (!row) throw new HarnessError("not_found", "planning Decision Record was not found in the current project");
+    const preview = row.preview_id ? this.database.get<{ impact_json: string; status: string; created_at: string; applied_at: string | null }>(
+      "SELECT impact_json, status, created_at, applied_at FROM draft_change_set_previews WHERE id = ? AND project_id = ?",
+      row.preview_id, projectId,
+    ) : undefined;
+    return {
+      treeId: row.tree_id,
+      decision: {
+        decisionId: row.decision_id, discussionTopic: row.discussion_topic,
+        currentUnderstanding: row.current_understanding,
+        consideredOptions: JSON.parse(row.considered_options_json) as string[],
+        agentRecommendation: row.agent_recommendation, userDecision: row.user_decision,
+        affectedRefs: JSON.parse(row.affected_refs_json) as unknown,
+        sourceUserMessageTraceEventId: row.source_message_trace_event_id,
+        planningTraceEventId: row.trace_event_id, createdAt: row.created_at,
+      },
+      changeSet: {
+        changeSetId: row.change_set_id, baseRevisionId: row.base_revision_id,
+        resultRevisionId: row.result_revision_id, operations: JSON.parse(row.operations_json) as unknown,
+        decisionSummary: row.decision_summary,
+        affectedNodeIds: JSON.parse(row.affected_node_ids_json) as string[],
+        affectedBranchIds: JSON.parse(row.affected_branch_ids_json) as string[],
+        affectedArtifactIds: JSON.parse(row.affected_artifact_ids_json) as string[],
+        affectedRelationRefs: JSON.parse(row.affected_relation_refs_json) as string[],
+        affectedContractIds: JSON.parse(row.affected_contract_ids_json) as string[],
+        applyMode: row.apply_mode, previewId: row.preview_id,
+        planningTraceEventId: row.planning_trace_event_id,
+      },
+      preview: preview ? {
+        previewId: row.preview_id, impact: JSON.parse(preview.impact_json) as unknown,
+        status: preview.status, createdAt: preview.created_at, appliedAt: preview.applied_at,
+      } : null,
+    };
+  }
+
   private mapArtifact(row: ArtifactRow) {
     return {
       artifactId: row.id,

@@ -75,8 +75,28 @@ function issue(input: Omit<ReadinessIssue, "issueId" | "priorityScore" | "priori
 }
 
 export function validateDraftStructure(document: TaskTreeDocument): ValidationError[] {
-  return validateTaskTree(document).errors.filter((error) =>
+  const errors = validateTaskTree(document).errors.filter((error) =>
     error.code === "invalid_tree_structure" || error.code === "artifact_reference_invalid");
+  const nodeIds = new Set(document.nodes.map((node) => node.id));
+  const artifactIds = new Set(document.artifacts.map((artifact) => artifact.id));
+  document.relations.forEach((relation, index) => {
+    if (relation.artifactId && !artifactIds.has(relation.artifactId)) {
+      errors.push({ code: "artifact_reference_invalid", path: `relations[${index}].artifactId` });
+    }
+  });
+  (document.artifactContracts ?? []).forEach((contract, index) => {
+    if (!artifactIds.has(contract.artifactId)
+      || contract.providerNodeIds.some((id) => !nodeIds.has(id))
+      || contract.consumerNodeIds.some((id) => !nodeIds.has(id))) {
+      errors.push({ code: "artifact_reference_invalid", path: `artifactContracts[${index}]` });
+    }
+  });
+  (document.skeletonCriteria ?? []).forEach((criterion, index) => {
+    if (!nodeIds.has(criterion.branchNodeId)) {
+      errors.push({ code: "invalid_tree_structure", path: `skeletonCriteria[${index}].branchNodeId` });
+    }
+  });
+  return [...new Map(errors.map((error) => [`${error.code}:${error.path}`, error])).values()];
 }
 
 function scopeNodeIds(document: TaskTreeDocument, scopeRootNodeId?: string): Set<string> | null {
@@ -200,14 +220,28 @@ export function analyzePlanReadiness(document: TaskTreeDocument, scopeRootNodeId
       }
     }
 
+    const artifactIds = new Set(document.artifacts.map((artifact) => artifact.id));
     document.relations.forEach((relation, index) => {
       if (!scope.has(relation.fromNodeId) && !scope.has(relation.toNodeId)) return;
-      if (["calls", "data_exchange", "shares_contract"].includes(relation.kind) && !relation.artifactId) {
+      if (["calls", "data_exchange", "shares_contract"].includes(relation.kind)
+        && (!relation.artifactId || !artifactIds.has(relation.artifactId))) {
         blockingIssues.push(issue({
           code: "relation_contract_missing", category: "cross_branch_contract", severity: "blocking",
           summary: "Bind " + relation.kind + " relation to an Artifact Contract",
           affectedRefs: [relation.fromNodeId, relation.toNodeId, "relations[" + index + "]"],
           crossBranch: topBranchForNode(document, relation.fromNodeId) !== topBranchForNode(document, relation.toNodeId),
+        }));
+      }
+    });
+    (document.artifactContracts ?? []).forEach((contract, index) => {
+      const affectedNodes = [...contract.providerNodeIds, ...contract.consumerNodeIds];
+      if (!affectedNodes.some((nodeId) => scope.has(nodeId))) return;
+      if (validation.errors.some((error) => error.code === "artifact_contract_invalid" && error.path === `artifactContracts[${index}]`)) {
+        blockingIssues.push(issue({
+          code: "artifact_contract_incomplete", category: "cross_branch_contract", severity: "blocking",
+          summary: "Complete Artifact Contract " + (contract.name || contract.id),
+          affectedRefs: [contract.id, contract.artifactId, ...affectedNodes],
+          crossBranch: new Set(affectedNodes.map((nodeId) => topBranchForNode(document, nodeId))).size > 1,
         }));
       }
     });
@@ -284,12 +318,12 @@ export function analyzeDraftImpact(base: TaskTreeDocument, candidate: TaskTreeDo
     const branch = topBranchForNode(candidate, nodeId) ?? topBranchForNode(base, nodeId);
     return branch && branch !== root?.id ? [branch] : [];
   }))].sort();
-  if (rootChanged) {
+  const planningChanged = canonicalJson(base.planningContext ?? null) !== canonicalJson(candidate.planningContext ?? null)
+    || base.planningVersion !== candidate.planningVersion;
+  if (rootChanged || planningChanged) {
     for (const branch of root?.children ?? []) if (!branchIds.includes(branch)) branchIds.push(branch);
     branchIds.sort();
   }
-  const planningChanged = canonicalJson(base.planningContext ?? null) !== canonicalJson(candidate.planningContext ?? null)
-    || base.planningVersion !== candidate.planningVersion;
   const hasStructuralChange = planningChanged || uniqueNodes.length > 0 || affectedArtifactIds.length > 0
     || affectedRelationRefs.length > 0 || affectedContractIds.length > 0;
   const crossBranch = rootChanged || branchIds.length > 1 || planningChanged;

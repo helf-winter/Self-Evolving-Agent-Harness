@@ -40,6 +40,10 @@ describe("Task refinement domain", () => {
     expect(validateDraftStructure({
       ...incomplete, nodes: incomplete.nodes.map((node) => node.id === "branch-a" ? { ...node, parentId: "missing" } : node),
     })).toEqual(expect.arrayContaining([expect.objectContaining({ code: "invalid_tree_structure" })]));
+    expect(validateDraftStructure({
+      ...incomplete,
+      relations: [{ fromNodeId: "branch-a", toNodeId: "branch-b", kind: "calls", artifactId: "unknown-contract" }],
+    })).toEqual(expect.arrayContaining([expect.objectContaining({ code: "artifact_reference_invalid", path: "relations[0].artifactId" })]));
   });
 
   it("ranks deterministic scoped blockers and does not let a sibling-only issue block a ready branch", () => {
@@ -77,6 +81,11 @@ describe("Task refinement domain", () => {
     broad.nodes[1] = { ...broad.nodes[1]!, title: "A2" };
     broad.nodes[2] = { ...broad.nodes[2]!, title: "B2" };
     expect(analyzeDraftImpact(base, broad)).toMatchObject({
+      impactLevel: "cross_branch", applyMode: "preview_required", affectedBranchIds: ["branch-a", "branch-b"],
+    });
+    const planning = document();
+    planning.planningContext = { ...planning.planningContext!, goal: "Build and publish feature" };
+    expect(analyzeDraftImpact(base, planning)).toMatchObject({
       impactLevel: "cross_branch", applyMode: "preview_required", affectedBranchIds: ["branch-a", "branch-b"],
     });
     expect(analyzeDraftImpact(base, document()).hasStructuralChange).toBe(false);

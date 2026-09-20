@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TaskTreeService } from "../../src/application/task-tree-service.js";
+import { RuntimeQueryService } from "../../src/application/runtime-query-service.js";
 import type { TaskTreeDocument } from "../../src/domain/task-tree.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
 
@@ -261,6 +262,16 @@ describe("TaskTreeService", () => {
     expect(changeSet?.planning_trace_event_id).toBeTruthy();
     expect(database.get<{ event_name: string }>("SELECT event_name FROM trace_events WHERE id = ?", changeSet!.planning_trace_event_id)).toEqual({ event_name: "PlanningDecisionApplied" });
     expect(database.all("SELECT id FROM skeleton_acceptance_criteria WHERE tree_revision_id = ?", applied.revisionId)).toHaveLength(2);
+    const history = new RuntimeQueryService(database).getTaskRefinementHistory("p1", root.treeId, { limit: 10 });
+    expect(history.items).toEqual([expect.objectContaining({
+      baseRevisionId: draft.revisionId, resultRevisionId: applied.revisionId, applyMode: "direct",
+      discussionTopic: "Clarify branch A", userDecision: "Refine", sourceUserMessageTraceEventId: "prompt-1",
+    })]);
+    const detail = new RuntimeQueryService(database).getPlanningDecisionDetail("p1", history.items[0]!.decisionId);
+    expect(detail).toMatchObject({
+      decision: { consideredOptions: ["Keep", "Refine"], agentRecommendation: "Refine" },
+      changeSet: { planningTraceEventId: changeSet!.planning_trace_event_id, affectedNodeIds: ["branch-a"] },
+    });
     database.close();
   });
 

@@ -75,6 +75,13 @@ const pluginEffectDispositionSchema = z.object({
   effectId: z.string().min(1), action: z.enum(["inverse_applied", "compensation_applied", "retain"]),
   observedBaselineRef: z.string().nullable(), evidenceRefs: z.array(z.string().min(1)).min(1), residualImpact: z.string(),
 });
+const refinementDecisionSchema = z.object({
+  discussionTopic: z.string().min(1),
+  currentUnderstanding: z.string().min(1),
+  consideredOptions: z.array(z.string().min(1)).min(1),
+  agentRecommendation: z.string().min(1),
+  userDecision: z.string().min(1),
+});
 
 export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   const runtime = openRuntime(environment);
@@ -218,19 +225,29 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   }, ({ cwd, title }) => guarded(async () => runtime.taskTrees.createTaskRoot({ projectId: (await persistedProject(cwd)).projectId, title })));
 
   server.registerTool("harness_save_draft_revision", {
-    description: "Save a complete validated Task Tree as a new immutable draft revision.",
+    description: "Save a structurally valid Task Tree draft as a new immutable revision; planning drafts may remain incomplete until readiness succeeds.",
     inputSchema: { cwd: cwdSchema, treeId: z.string(), baseRevisionId: z.string(), document: z.unknown() },
   }, ({ cwd, treeId, baseRevisionId, document }) => guarded(async () => runtime.taskTrees.saveDraftRevision({ projectId: (await existingProject(cwd)).projectId, treeId, baseRevisionId, document: document as TaskTreeDocument })));
 
+  server.registerTool("harness_preview_draft_change_set", {
+    description: "Persist a revision-bound impact preview for a proposed Task Tree refinement; cross-branch changes require this preview before apply.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1), baseRevisionId: z.string().min(1), document: z.unknown() },
+  }, ({ cwd, treeId, baseRevisionId, document }) => guarded(async () => runtime.taskTrees.previewDraftChangeSet({
+    projectId: (await existingProject(cwd)).projectId, treeId, baseRevisionId,
+    proposedDocument: document as TaskTreeDocument,
+  })));
+
   server.registerTool("harness_apply_draft_change_set", {
-    description: "Apply a documented local refinement as a new immutable Task Tree revision.",
+    description: "Atomically apply an evidence-linked Task Tree refinement with a user-visible Decision Record and planning Trace.",
     inputSchema: {
       cwd: cwdSchema, treeId: z.string(), baseRevisionId: z.string(), document: z.unknown(),
-      affectedReferences: z.array(z.string()), decisionSummary: z.string().min(1),
+      sourceUserMessageTraceEventId: z.string().min(1), previewId: z.string().min(1).optional(),
+      decision: refinementDecisionSchema,
     },
-  }, ({ cwd, treeId, baseRevisionId, document, affectedReferences, decisionSummary }) => guarded(async () => runtime.taskTrees.applyDraftChangeSet({
+  }, ({ cwd, treeId, baseRevisionId, document, sourceUserMessageTraceEventId, previewId, decision }) => guarded(async () => runtime.taskTrees.applyRefinementChangeSet({
     projectId: (await existingProject(cwd)).projectId, treeId, baseRevisionId,
-    operations: [{ op: "replace_document", document: document as TaskTreeDocument }], affectedReferences, decisionSummary,
+    operations: [{ op: "replace_document", document: document as TaskTreeDocument }],
+    sourceUserMessageTraceEventId, ...(previewId ? { previewId } : {}), decision,
   })));
 
   server.registerTool("harness_scan_plan_readiness", {
@@ -263,6 +280,24 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     description: "Get the current Task Tree revision, one-hop relations, Artifacts, and Trace count.",
     inputSchema: { cwd: cwdSchema, treeId: z.string() },
   }, ({ cwd, treeId }) => guarded(async () => runtime.queries.getTaskTreeSummary((await existingProject(cwd)).projectId, treeId)));
+
+  server.registerTool("harness_get_task_refinement_history", {
+    description: "Get bounded, revision-linked Task Tree refinement Decision Records for the current project.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().min(1),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, limit, cursor }) => guarded(async () => runtime.queries.getTaskRefinementHistory(
+    (await existingProject(cwd)).projectId, treeId,
+    { ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_planning_decision_detail", {
+    description: "Get one Task Tree refinement Decision Record with Change Set, impact, preview, and Trace references.",
+    inputSchema: { cwd: cwdSchema, decisionId: z.string().min(1) },
+  }, ({ cwd, decisionId }) => guarded(async () => runtime.queries.getPlanningDecisionDetail(
+    (await existingProject(cwd)).projectId, decisionId,
+  )));
 
   server.registerTool("harness_get_task_node_detail", {
     description: "Get one Task Node and paginated evidence from the current project.",
