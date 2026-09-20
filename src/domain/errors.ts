@@ -14,6 +14,8 @@ export type HarnessErrorCode =
   | "evidence_not_found"
   | "evidence_scope_mismatch"
   | "evaluation_not_applicable"
+  | "runtime_action_rejected"
+  | "confirmation_not_applicable"
   | "database_busy"
   | "storage_failure";
 
