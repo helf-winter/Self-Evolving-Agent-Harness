@@ -98,6 +98,17 @@ export class TaskTreeService {
     affectedReferences: string[];
     decisionSummary: string;
   }): TaskTreeRevisionView {
+    return this.database.transaction(() => this.applyDraftChangeSetWithinTransaction(input));
+  }
+
+  applyDraftChangeSetWithinTransaction(input: {
+    projectId: string;
+    treeId: string;
+    baseRevisionId: string;
+    operations: Array<{ op: "replace_document"; document: TaskTreeDocument }>;
+    affectedReferences: string[];
+    decisionSummary: string;
+  }): TaskTreeRevisionView {
     const tree = this.requireTree(input.projectId, input.treeId);
     if (tree.current_revision_id !== input.baseRevisionId) throw new HarnessError("revision_conflict", "the Draft Change Set has a stale base revision");
     if (input.operations.length !== 1 || input.operations[0]?.op !== "replace_document" || !input.decisionSummary.trim()) {
@@ -106,13 +117,11 @@ export class TaskTreeService {
     const document = input.operations[0].document;
     this.assertValidDocument(document);
     const changeSetId = newId();
-    return this.database.transaction(() => {
-      this.database.run(
-        "INSERT INTO draft_change_sets (id, tree_id, base_revision_id, operations_json, affected_references_json, decision_summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        changeSetId, input.treeId, input.baseRevisionId, canonicalJson(input.operations), canonicalJson(input.affectedReferences), input.decisionSummary, nowIso(),
-      );
-      return this.persistRevision(tree, input.projectId, document, false);
-    });
+    this.database.run(
+      "INSERT INTO draft_change_sets (id, tree_id, base_revision_id, operations_json, affected_references_json, decision_summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      changeSetId, input.treeId, input.baseRevisionId, canonicalJson(input.operations), canonicalJson(input.affectedReferences), input.decisionSummary, nowIso(),
+    );
+    return this.persistRevision(tree, input.projectId, document, false);
   }
 
   scanPlanReadiness(input: { projectId: string; treeId: string; scopeRootNodeId?: string }) {
