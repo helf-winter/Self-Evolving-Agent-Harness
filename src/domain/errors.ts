@@ -16,6 +16,8 @@ export type HarnessErrorCode =
   | "evaluation_not_applicable"
   | "runtime_action_rejected"
   | "confirmation_not_applicable"
+  | "failure_case_invalid"
+  | "reproduction_validation_rejected"
   | "database_busy"
   | "storage_failure";
 
