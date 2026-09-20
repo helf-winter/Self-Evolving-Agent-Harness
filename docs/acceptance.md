@@ -78,17 +78,31 @@ harness node evaluate ATTEMPT_ID succeeded --json
 5. 对上述 blocked Attempt 提出 `succeeded` Evaluation；确认结果被记录为 `uncertain`，transition 的 rejection code 为 `blocking_drift`，节点不会变为成功。
 6. 重启 Claude 后再次查询 Artifact Detail 和 Plan Drift Summary；确认状态、来源和 Drift 记录仍存在。
 
-## 6. 安全检查
+## 6. Runtime Action 与 User Change
+
+在已经确认的 Task Tree 中制造一个 `blocking` Drift，然后使用 Claude 插件中的 Runtime Tools 验收：
+
+1. 查询 Runtime Snapshot 和 Plan Drift Summary，记录当前 Tree revision 与 Drift ID。
+2. 提交 `harness_propose_plan_drift_resolution`；确认产生 `drift_resolution` 等待项，且 Drift 尚未解决。
+3. 用户回答后，以明确的 confirmation ID 和回答 Trace 调用 `harness_resolve_runtime_confirmation`；确认 Drift 已按决策解决，节点进入相应的重新验证、修正或取消状态。
+4. 分别提交 `minor_change` 和 `priority_change`；确认前者不改变 Tree revision，后者只改变选中的后续节点。
+5. 提交包含完整候选 Task Tree 文档的 `scope_change`；确认当前 revision 在回答前不变，并产生 `change_confirmation` 等待项。
+6. 回答 `yes` 后确认只产生一个新草稿 revision，workflow 回到 `task_tree_refinement`，受影响分支需要重新扫描和确认，不能立即执行代码。
+7. 退出并重启 Claude，调用 `harness_get_user_change_requests` 和 `harness_get_runtime_action_detail`；确认三类变更、动作结果、确认答案与关联 Drift 均可恢复，且 `harness_get_waiting_items` 不再返回已解决提示。
+
+额外验证 `no`、`pause`、重复回答、旧 revision、其他 Project 的 ID 和早于提示的回答 Trace：均不得产生跨 Project、重复或部分状态写入。
+
+## 7. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-## 7. 当前不作为验收失败的范围
+## 8. 当前不作为验收失败的范围
 
 - Evolution 自动结论与经验晋升；
 - 失败案例 L0-L4 自动化；
-- blocking Drift Resolution、User Change Request、Task Node Replacement 与 Effect Disposal；
+- Task Node Replacement 与 Effect Disposal；
 - 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

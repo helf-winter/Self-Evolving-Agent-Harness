@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation 以及 Node Execution & Evaluation 三个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift，以及 Runtime Action & User Change 五个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
@@ -16,8 +16,11 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Snapshot、Task Tree、Artifact Graph、Artifact Detail、Plan Drift 与分页 Trace 查询，全部严格按 Project 隔离；
 - 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
 - 未解决的阻断 Drift 会把成功提议记录为 `uncertain`，Evaluation 不能绕过确认门禁；
+- Runtime Action 将自然语言意图转换为可校验的结构化状态变更；阻断 Drift Resolution 和 Scope Change 必须绑定明确的确认提示与用户回答 Trace；
+- User Change Request 区分 `minor_change`、`priority_change` 和 `scope_change`，保留来源、影响、状态及关联动作；
+- Scope Change 确认后产生新的 Task Tree 草稿修订并回到精炼阶段，不会直接授权代码执行；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 19 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 25 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -87,6 +90,19 @@ Agent 可按需使用以下 Runtime Tools：
 - `harness_record_plan_drift`：记录不能由 Hook 确定判断的语义偏移。
 
 `warning` Drift 作为事实记录继续执行；`blocking` Drift 会把相关节点和活动 Attempt 置为 `blocked`，直到后续用户确认流程解决该偏移。所有查询都只返回当前目录所绑定 Project 的数据。
+
+### Runtime Action 与 User Change
+
+自然语言输入不会直接改写 Runtime State。Agent 先使用查询工具获取当前快照、Drift、Task Tree 与 Artifact 事实，再把意图提交为结构化 Runtime Action：
+
+1. `harness_propose_plan_drift_resolution` 为一个待处理的阻断 Drift 提议 `accepted`、`rejected` 或 `branch_cancelled`；
+2. `harness_propose_user_change` 记录 `minor_change`、`priority_change` 或 `scope_change`；
+3. `harness_get_waiting_items` 返回当前 Project 中等待回答的明确提示；
+4. 用户回答由 Hook 记录为 `UserPromptSubmit` Trace；
+5. `harness_resolve_runtime_confirmation` 使用明确的 `confirmationId` 与回答 Trace 提交 `yes`、`no` 或 `pause`；
+6. `harness_get_user_change_requests` 和 `harness_get_runtime_action_detail` 用于回看持久化结果。
+
+`minor_change` 只记录事实，`priority_change` 只改变当前选中的后续节点；二者不修改 Task Tree revision。`scope_change` 和阻断 Drift Resolution 属于高风险动作，必须确认。确认 Scope Change 只会创建新草稿并回到 Task Tree refinement，仍需重新扫描就绪条件并确认受影响分支后才能执行代码。
 
 ### 分支确认链路
 
