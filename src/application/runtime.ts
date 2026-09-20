@@ -11,6 +11,7 @@ import { TaskTreeService } from "./task-tree-service.js";
 import { WorkflowService } from "./workflow-service.js";
 import { FailureCaseService } from "./failure-case-service.js";
 import { EvolutionService } from "./evolution-service.js";
+import { ReplacementService } from "./replacement-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -18,6 +19,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const drifts = new PlanDriftService(database);
   const failures = new FailureCaseService(database);
   const evolution = new EvolutionService(database);
+  const replacements = new ReplacementService(database);
   return {
     database,
     projects,
@@ -27,6 +29,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     evaluations: new EvaluationService(database, failures, evolution),
     failures,
     evolution,
+    replacements,
     drifts,
     actions: new RuntimeActionService(database, drifts),
     queries: new RuntimeQueryService(database),
