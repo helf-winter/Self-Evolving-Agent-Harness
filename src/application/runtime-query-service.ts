@@ -4,6 +4,7 @@ import type { RuntimeDatabase } from "../storage/database.js";
 import type { PlanDriftResolutionStatus, PlanDriftSeverity } from "./plan-drift-service.js";
 import type { UserChangeType } from "../domain/runtime-action.js";
 import type { FailureAvailabilityStatus, FailureMaturityLevel } from "../domain/failure-case.js";
+import { disposalCapability, type EffectDisposalStatus, type ReplacementStatus, type TaskNodeEffectType } from "../domain/composition.js";
 
 interface TraceRow {
   id: string;
@@ -719,6 +720,171 @@ export class RuntimeQueryService {
         reportId: item.id, verdict: item.promotion_verdict,
         rejectionReasons: JSON.parse(item.rejection_reasons_json) as string[],
         evidenceRefs: JSON.parse(item.evidence_refs_json) as string[], createdAt: item.created_at,
+      })),
+    };
+  }
+
+  getTaskNodeEffects(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    effectType?: TaskNodeEffectType;
+    disposalStatus?: EffectDisposalStatus;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("task_node_id = ?"); params.push(query.nodeId); }
+    if (query.effectType) { filters.push("effect_type = ?"); params.push(query.effectType); }
+    if (query.disposalStatus) { filters.push("disposal_status = ?"); params.push(query.disposalStatus); }
+    const rows = this.database.all<{
+      id: string; tree_id: string; task_node_id: string; owner_revision_id: string;
+      effect_type: TaskNodeEffectType; target_ref: string; operation: string; baseline_ref: string | null;
+      inverse_operation: string | null; compensation_operation: string | null; evidence_refs_json: string;
+      disposal_status: EffectDisposalStatus; created_at: string; disposed_at: string | null;
+    }>(`SELECT * FROM task_node_effects WHERE ${filters.join(" AND ")}
+        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        effectId: row.id, treeId: row.tree_id, nodeId: row.task_node_id,
+        ownerRevisionId: row.owner_revision_id, effectType: row.effect_type,
+        capability: disposalCapability(row.effect_type), targetRef: row.target_ref,
+        operation: row.operation, baselineRef: row.baseline_ref,
+        inverseOperation: row.inverse_operation, compensationOperation: row.compensation_operation,
+        evidenceRefs: JSON.parse(row.evidence_refs_json) as string[], disposalStatus: row.disposal_status,
+        createdAt: row.created_at, disposedAt: row.disposed_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getTaskNodeReplacements(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    status?: ReplacementStatus;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("task_node_id = ?"); params.push(query.nodeId); }
+    if (query.status) { filters.push("status = ?"); params.push(query.status); }
+    const rows = this.database.all<{
+      id: string; tree_id: string; task_node_id: string; old_revision_id: string; candidate_revision_id: string;
+      expected_tree_revision_id: string; affected_task_node_ids_json: string; contract_diff_json: string;
+      effect_risk_summary_json: string; user_confirmation_ref: string | null; status: ReplacementStatus;
+      activated_tree_revision_id: string | null; created_at: string; completed_at: string | null;
+    }>(`SELECT id, tree_id, task_node_id, old_revision_id, candidate_revision_id,
+               expected_tree_revision_id, affected_task_node_ids_json, contract_diff_json,
+               effect_risk_summary_json, user_confirmation_ref, status, activated_tree_revision_id,
+               created_at, completed_at
+        FROM task_node_replacement_records WHERE ${filters.join(" AND ")}
+        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        replacementId: row.id, treeId: row.tree_id, nodeId: row.task_node_id,
+        oldRevisionId: row.old_revision_id, candidateRevisionId: row.candidate_revision_id,
+        expectedTreeRevisionId: row.expected_tree_revision_id,
+        affectedTaskNodeIds: JSON.parse(row.affected_task_node_ids_json) as string[],
+        contractDiff: JSON.parse(row.contract_diff_json) as unknown,
+        effectRiskSummary: JSON.parse(row.effect_risk_summary_json) as unknown,
+        confirmationId: row.user_confirmation_ref, status: row.status,
+        activatedTreeRevisionId: row.activated_tree_revision_id,
+        createdAt: row.created_at, completedAt: row.completed_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getTaskNodeReplacementDetail(projectId: string, replacementId: string) {
+    this.requireProject(projectId);
+    const row = this.database.get<{
+      id: string; tree_id: string; task_node_id: string; old_revision_id: string; candidate_revision_id: string;
+      expected_tree_revision_id: string; affected_task_node_ids_json: string; suspension_order_json: string;
+      contract_diff_json: string; effect_risk_summary_json: string; prior_execution_statuses_json: string;
+      user_confirmation_ref: string | null; runtime_action_id: string | null; status: ReplacementStatus;
+      disposal_result_refs_json: string; recovery_result_json: string | null; trace_event_ids_json: string;
+      activated_tree_revision_id: string | null; created_at: string; completed_at: string | null;
+      body_json: string; provides_contract_ids_json: string; requires_contract_ids_json: string; candidate_created_at: string;
+    }>(`SELECT r.*, c.body_json, c.provides_contract_ids_json, c.requires_contract_ids_json,
+               c.created_at AS candidate_created_at
+        FROM task_node_replacement_records r
+        JOIN task_node_candidate_revisions c ON c.id = r.candidate_revision_id
+        WHERE r.id = ? AND r.project_id = ?`, replacementId, projectId);
+    if (!row) throw new HarnessError("not_found", "Task Node Replacement was not found in this Project");
+    const effects = this.database.all<{
+      id: string; effect_type: TaskNodeEffectType; target_ref: string; operation: string;
+      baseline_ref: string | null; disposal_status: EffectDisposalStatus; evidence_refs_json: string; created_at: string;
+    }>(`SELECT id, effect_type, target_ref, operation, baseline_ref, disposal_status, evidence_refs_json, created_at
+        FROM task_node_effects WHERE project_id = ? AND owner_revision_id = ? ORDER BY created_at, id`,
+    projectId, row.old_revision_id);
+    const disposalResults = this.database.all<{
+      id: string; task_node_effect_id: string; disposition_action: string; disposal_capability: string;
+      disposal_status: string; observed_baseline_ref: string | null; evidence_refs_json: string;
+      residual_impact: string; created_at: string;
+    }>("SELECT * FROM effect_disposal_results WHERE replacement_id = ? AND project_id = ? ORDER BY created_at, id", replacementId, projectId);
+    const transitions = this.database.all<{
+      id: string; task_node_id: string; task_node_revision_id: string; from_state: string | null;
+      to_state: string; reason: string; created_at: string;
+    }>(`SELECT id, task_node_id, task_node_revision_id, from_state, to_state, reason, created_at
+        FROM task_node_composition_transitions WHERE replacement_id = ? AND project_id = ? ORDER BY created_at, id`,
+    replacementId, projectId);
+    const confirmation = row.user_confirmation_ref ? this.database.get<{
+      id: string; prompt: string; status: string; answer: string | null; answer_trace_event_id: string | null;
+      created_at: string; resolved_at: string | null;
+    }>("SELECT id, prompt, status, answer, answer_trace_event_id, created_at, resolved_at FROM runtime_confirmation_prompts WHERE id = ? AND project_id = ?", row.user_confirmation_ref, projectId) : undefined;
+    return {
+      replacement: {
+        replacementId: row.id, treeId: row.tree_id, nodeId: row.task_node_id,
+        oldRevisionId: row.old_revision_id, candidateRevisionId: row.candidate_revision_id,
+        expectedTreeRevisionId: row.expected_tree_revision_id,
+        affectedTaskNodeIds: JSON.parse(row.affected_task_node_ids_json) as string[],
+        suspensionOrder: JSON.parse(row.suspension_order_json) as string[],
+        contractDiff: JSON.parse(row.contract_diff_json) as unknown,
+        effectRiskSummary: JSON.parse(row.effect_risk_summary_json) as unknown,
+        priorExecutionStatuses: JSON.parse(row.prior_execution_statuses_json) as unknown,
+        status: row.status, disposalResultRefs: JSON.parse(row.disposal_result_refs_json) as string[],
+        recoveryResult: row.recovery_result_json ? JSON.parse(row.recovery_result_json) as unknown : null,
+        traceEventIds: JSON.parse(row.trace_event_ids_json) as string[],
+        activatedTreeRevisionId: row.activated_tree_revision_id,
+        runtimeActionId: row.runtime_action_id, createdAt: row.created_at, completedAt: row.completed_at,
+      },
+      candidate: {
+        candidateRevisionId: row.candidate_revision_id, body: JSON.parse(row.body_json) as unknown,
+        providesContractIds: JSON.parse(row.provides_contract_ids_json) as string[],
+        requiresContractIds: JSON.parse(row.requires_contract_ids_json) as string[], createdAt: row.candidate_created_at,
+      },
+      confirmation: confirmation ? {
+        confirmationId: confirmation.id, prompt: confirmation.prompt, status: confirmation.status,
+        answer: confirmation.answer, answerTraceEventId: confirmation.answer_trace_event_id,
+        createdAt: confirmation.created_at, resolvedAt: confirmation.resolved_at,
+      } : null,
+      effects: effects.map((effect) => ({
+        effectId: effect.id, effectType: effect.effect_type, capability: disposalCapability(effect.effect_type),
+        targetRef: effect.target_ref, operation: effect.operation, baselineRef: effect.baseline_ref,
+        disposalStatus: effect.disposal_status, evidenceRefs: JSON.parse(effect.evidence_refs_json) as string[], createdAt: effect.created_at,
+      })),
+      disposalResults: disposalResults.map((result) => ({
+        disposalResultId: result.id, effectId: result.task_node_effect_id, action: result.disposition_action,
+        capability: result.disposal_capability, status: result.disposal_status,
+        observedBaselineRef: result.observed_baseline_ref,
+        evidenceRefs: JSON.parse(result.evidence_refs_json) as string[], residualImpact: result.residual_impact,
+        createdAt: result.created_at,
+      })),
+      compositionTransitions: transitions.map((transition) => ({
+        transitionId: transition.id, nodeId: transition.task_node_id, nodeRevisionId: transition.task_node_revision_id,
+        fromState: transition.from_state, toState: transition.to_state,
+        reason: transition.reason, createdAt: transition.created_at,
       })),
     };
   }

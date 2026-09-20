@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { openRuntime } from "../../application/runtime.js";
 import { HarnessError } from "../../domain/errors.js";
-import type { TaskTreeDocument } from "../../domain/task-tree.js";
+import type { TaskNodeInput, TaskTreeDocument } from "../../domain/task-tree.js";
 import type { FailureReproductionContract, ReproductionValidationObservation } from "../../domain/failure-case.js";
 
 function result(value: unknown) {
@@ -406,6 +406,105 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   }, ({ cwd, candidateRevisionId, idempotencyKey }) => guarded(async () => runtime.evolution.generateSkillValidationReport({
     projectId: (await existingProject(cwd)).projectId, candidateRevisionId, idempotencyKey,
   })));
+
+  server.registerTool("harness_register_task_node_effect", {
+    description: "Register an immutable Effect owned by the current active Task Node revision; this records metadata and never executes inverse operations.",
+    inputSchema: {
+      cwd: cwdSchema, ownerRevisionId: z.string().min(1),
+      effectType: z.enum(["reversible", "version_reversible", "compensatable", "irreversible"]),
+      targetRef: z.string().min(1), operation: z.string().min(1), baselineRef: z.string().nullable().optional(),
+      inverseOperation: z.string().nullable().optional(), compensationOperation: z.string().nullable().optional(),
+      evidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ cwd, ownerRevisionId, effectType, targetRef, operation, baselineRef, inverseOperation, compensationOperation, evidenceRefs }) => guarded(async () => runtime.replacements.registerTaskNodeEffect({
+    projectId: (await existingProject(cwd)).projectId, ownerRevisionId, effectType, targetRef, operation,
+    baselineRef: baselineRef ?? null, inverseOperation: inverseOperation ?? null,
+    compensationOperation: compensationOperation ?? null, evidenceRefs,
+  })));
+
+  server.registerTool("harness_get_task_node_effects", {
+    description: "List Project-scoped revision-owned Effects and their disposal capabilities/status.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(),
+      effectType: z.enum(["reversible", "version_reversible", "compensatable", "irreversible"]).optional(),
+      disposalStatus: z.enum(["active", "disposed", "compensated", "conflict", "manual_resolution", "not_disposable"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, effectType, disposalStatus, limit, cursor }) => guarded(async () => runtime.queries.getTaskNodeEffects(
+    (await existingProject(cwd)).projectId,
+    {
+      ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}),
+      ...(effectType ? { effectType } : {}), ...(disposalStatus ? { disposalStatus } : {}),
+      ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+    },
+  )));
+
+  server.registerTool("harness_preview_task_node_replacement", {
+    description: "Create an immutable candidate and revision-bound high-risk preview without changing the active Task Tree.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().min(1), nodeId: z.string().min(1), expectedTreeRevisionId: z.string().min(1),
+      candidateBody: z.unknown(), providesContractIds: z.array(z.string().min(1)), requiresContractIds: z.array(z.string().min(1)),
+      reason: z.string().min(1), sourceMessageTraceEventId: z.string().min(1),
+    },
+  }, ({ cwd, treeId, nodeId, expectedTreeRevisionId, candidateBody, providesContractIds, requiresContractIds, reason, sourceMessageTraceEventId }) => guarded(async () => runtime.replacements.previewTaskNodeReplacement({
+    projectId: (await existingProject(cwd)).projectId, treeId, nodeId, expectedTreeRevisionId,
+    candidateBody: candidateBody as TaskNodeInput, providesContractIds, requiresContractIds, reason, sourceMessageTraceEventId,
+  })));
+
+  server.registerTool("harness_confirm_task_node_replacement", {
+    description: "Apply the explicit user answer to one Replacement confirmation; only yes suspends the impact closure.",
+    inputSchema: {
+      cwd: cwdSchema, replacementId: z.string().min(1), answer: z.enum(["yes", "no", "pause"]),
+      answerTraceEventId: z.string().min(1),
+    },
+  }, ({ cwd, replacementId, answer, answerTraceEventId }) => guarded(async () => runtime.replacements.confirmTaskNodeReplacement({
+    projectId: (await existingProject(cwd)).projectId, replacementId, answer, answerTraceEventId,
+  })));
+
+  const effectDispositionSchema = z.object({
+    effectId: z.string().min(1), action: z.enum(["inverse_applied", "compensation_applied", "retain"]),
+    observedBaselineRef: z.string().nullable(), evidenceRefs: z.array(z.string().min(1)).min(1),
+    residualImpact: z.string(),
+  });
+  server.registerTool("harness_execute_task_node_replacement", {
+    description: "Validate post-confirmation Effect disposition and activation evidence, then atomically activate the candidate or preserve a blocked/failed state.",
+    inputSchema: {
+      cwd: cwdSchema, replacementId: z.string().min(1), dispositions: z.array(effectDispositionSchema),
+      activationVerdict: z.enum(["succeeded", "failed"]), activationEvidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ cwd, replacementId, dispositions, activationVerdict, activationEvidenceRefs }) => guarded(async () => runtime.replacements.executeTaskNodeReplacement({
+    projectId: (await existingProject(cwd)).projectId, replacementId, dispositions,
+    activationVerdict, activationEvidenceRefs,
+  })));
+
+  server.registerTool("harness_recover_task_node_replacement", {
+    description: "Record evidence-backed recovery of a failed activation; compensation or irreversible Effects cannot be described as rollback.",
+    inputSchema: {
+      cwd: cwdSchema, replacementId: z.string().min(1), recoveryVerdict: z.enum(["restored", "failed"]),
+      evidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ cwd, replacementId, recoveryVerdict, evidenceRefs }) => guarded(async () => runtime.replacements.recoverTaskNodeReplacement({
+    projectId: (await existingProject(cwd)).projectId, replacementId, recoveryVerdict, evidenceRefs,
+  })));
+
+  server.registerTool("harness_get_task_node_replacements", {
+    description: "List Project-scoped Task Node Replacements with optional Tree, Node, status, and pagination filters.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(),
+      status: z.enum(["pending_confirmation", "suspending", "disposing", "activating", "completed", "rolled_back", "replacement_failed"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, status, limit, cursor }) => guarded(async () => runtime.queries.getTaskNodeReplacements(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(status ? { status } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_task_node_replacement_detail", {
+    description: "Get one Replacement with candidate, confirmation, Effects, every disposal attempt, composition transitions, and recovery evidence.",
+    inputSchema: { cwd: cwdSchema, replacementId: z.string().min(1) },
+  }, ({ cwd, replacementId }) => guarded(async () => runtime.queries.getTaskNodeReplacementDetail(
+    (await existingProject(cwd)).projectId, replacementId,
+  )));
 
   server.registerTool("harness_start_node_attempt", {
     description: "Start an evidence-backed Execution Attempt for the current Task Node revision.",

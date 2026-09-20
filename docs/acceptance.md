@@ -120,15 +120,29 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 额外验证：一次失败后成功不产生 Experience；跨 Project Experience、candidate、test 或 Trace 被拒绝；早于 test 创建的证据被拒绝；同一 repetition 不可被不同结果覆盖；缺少任一分片、任一模式少于三次、结果不稳定、Replay baseline 不具区分度、Negative 失败或出现 high/irreversible 副作用时报告必须 fail，不能晋升。
 
-## 9. 安全检查
+## 9. Task Node Replacement 与 Effect Disposal
+
+在一个已确认 Task Tree 中准备 provider 节点、依赖该 provider 的 consumer 节点和一个共享 Artifact Contract：
+
+1. 让 provider 通过普通工具产生 material Effect，并调用 `harness_register_task_node_effect`；确认 Effect 绑定精确的当前 Task Node revision 和来源 Trace。
+2. 调用 `harness_preview_task_node_replacement` 提交同一节点 ID、父节点和 children 的候选实现；确认返回不可变 candidate、Contract Diff、完整反向依赖影响闭包、逆序 suspension order、Effect risk 和 Runtime Confirmation Prompt，当前 Tree revision 尚未变化。
+3. 用提示之后的 `UserPromptSubmit` Trace 调用 `harness_confirm_task_node_replacement`；确认回答 `yes` 后 consumer 先于 provider 挂起，活动 Attempt 被阻断，而 `no` 不产生任何挂起或激活。
+4. 使用普通 Agent 工具执行 inverse 或 compensation 并产生 Trace，再调用 `harness_execute_task_node_replacement`；确认 Runtime 没有执行所保存的 operation 字符串。
+5. 对 version-reversible Effect 验证 baseline mismatch 和 shared active owner：必须返回持久化 conflict，不能部分激活；冲突解决后可以用新证据重试，并保留每次处置结果。
+6. 成功执行后确认新 Tree revision 原子激活，旧 revision 仍可查询，候选 Contract Binding 生效，受影响节点进入 `needs_revalidation`、`pending_dependency` 或 `pending_user_confirmation` 的确定性状态。
+7. 让候选激活失败；确认旧 revision 仍为当前 revision。仅当全部已处置 Effect 可逆时，使用新的恢复证据调用 `harness_recover_task_node_replacement`，恢复原组合状态。
+8. 重启 Claude，调用 `harness_get_task_node_replacements`、`harness_get_task_node_replacement_detail` 和 `harness_get_task_node_effects`；确认候选、确认答案、Effect、全部处置尝试、组合状态转换、激活/恢复结果与 Trace 引用完整保留。
+
+额外验证：旧 revision、跨 Project ID、拓扑变化、未知 Contract、缺失/过早证据、遗漏 Effect disposition、irreversible 自动处置均被拒绝，且不得留下部分 Tree 激活。
+
+## 10. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-## 10. 当前不作为验收失败的范围
+## 11. 当前不作为验收失败的范围
 
-- Task Node Replacement 与 Effect Disposal；
 - 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

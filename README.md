@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity，以及 Experience & Skill Evolution 七个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution，以及 Task Node Replacement & Effect Disposal 八个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
@@ -24,8 +24,10 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - 同一 Task Node revision 在两次及以上应用失败后成功时自动产生 Experience；Skill Candidate 指令以不可变 revision 冻结；
 - Replay、Variation、Holdout 与 Negative Applicability 测试先经过独立质量门禁，再分别记录 no-Skill baseline 与 Skill-enabled 重复运行；
 - Validation Report 由代码聚合覆盖率、基线区分度、稳定性、负面适用性与副作用风险，全部硬门禁通过后自动晋升 Skill；
+- Task Node Effect 绑定精确 revision，并按 reversible、version-reversible、compensatable、irreversible 分类；
+- Task Node Replacement 通过不可变候选、契约差异、依赖影响闭包、逆序挂起、证据化 Effect 处置、原子激活和失败恢复推进；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 36 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 44 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -138,6 +140,20 @@ Agent 通过以下工具完成可审计的进化闭环：
 
 每种必需分片的 baseline 与 Skill-enabled 模式都至少执行三次。Replay baseline 必须稳定失败而 Skill-enabled 稳定通过；Holdout 不接收候选指令快照并声明防泄漏策略；Negative Applicability 必须证明 Skill 不会在不适用场景中造成错误行为；任何 high 或 irreversible 副作用都会阻止晋升。
 
+### Task Node Replacement 与 Effect Disposal
+
+Task Node 的执行状态与组合状态相互独立。实现 revision 可以被替换，但历史 revision、Effect、Trace、确认和处置结果都保持不可变。Agent 通过以下 Runtime Tools 完成闭环：
+
+- `harness_register_task_node_effect`：把一次工具行为产生的 Effect 绑定到当前 Task Node revision；
+- `harness_get_task_node_effects`：按 Tree、Node、类型和处置状态分页查询 Effect；
+- `harness_preview_task_node_replacement`：保存候选 revision，计算 Contract Diff、反向依赖影响闭包和 Effect 风险，并创建明确确认提示；
+- `harness_confirm_task_node_replacement`：用提示之后的用户回答 Trace 提交 `yes`、`no` 或 `pause`；
+- `harness_execute_task_node_replacement`：校验证据化处置结果，成功时原子激活新的 Tree revision 并重评估受影响节点；
+- `harness_recover_task_node_replacement`：在激活失败且不存在不可恢复处置时恢复旧 revision 的组合状态；
+- `harness_get_task_node_replacements` 与 `harness_get_task_node_replacement_detail`：查询完整替换历史、候选、确认、Effect、处置和状态转换。
+
+Runtime 只记录 operation、inverse 和 compensation 的声明与执行证据，绝不把这些字符串当作 shell 命令执行。Version-reversible Effect 必须同时满足目标归属、基线一致且无共享活跃 owner；Compensation 是新的工程事实，不等同于回滚；Irreversible Effect 不允许自动处置。
+
 ### 分支确认链路
 
 Agent 通过 Runtime Tools 执行下列链路：
@@ -174,4 +190,4 @@ npm run check
 claude plugin validate ./plugin
 ```
 
-完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含项目 Clone/迁移自动改写、Codex Binding 和图形界面。

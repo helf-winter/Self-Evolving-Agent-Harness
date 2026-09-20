@@ -182,4 +182,29 @@ describe("RuntimeQueryService", () => {
     expect(() => service.getSkillCandidateDetail("p2", "candidate-query")).toThrow(expect.objectContaining({ code: "not_found" }));
     database.close();
   });
+
+  it("returns project-scoped Effects, Replacement summaries, and complete replacement detail", async () => {
+    const { database, tree, service } = await fixture();
+    const nodeId = tree.document.nodes[0]!.id;
+    const nodeRevision = database.get<{ id: string }>("SELECT id FROM task_node_revisions WHERE node_id = ?", nodeId)!;
+    database.run("INSERT INTO task_node_candidate_revisions (id, project_id, tree_id, task_node_id, base_tree_revision_id, base_node_revision_id, body_json, provides_contract_ids_json, requires_contract_ids_json, created_at) VALUES ('candidate-r', 'p1', ?, ?, ?, ?, '{}', '[]', '[]', '2030-01-01')", tree.treeId, nodeId, tree.revisionId, nodeRevision.id);
+    database.run("INSERT INTO task_node_effects (id, project_id, tree_id, task_node_id, owner_revision_id, effect_type, target_ref, operation, baseline_ref, inverse_operation, compensation_operation, evidence_refs_json, disposal_status, created_at, disposed_at) VALUES ('effect-r', 'p1', ?, ?, ?, 'reversible', 'runtime:route', 'register', NULL, 'unregister', NULL, '[\"e1\"]', 'disposed', '2030-01-01', '2030-01-03')", tree.treeId, nodeId, nodeRevision.id);
+    database.run("INSERT INTO task_node_replacement_records (id, project_id, tree_id, task_node_id, old_revision_id, candidate_revision_id, expected_tree_revision_id, affected_task_node_ids_json, suspension_order_json, contract_diff_json, effect_risk_summary_json, status, disposal_result_refs_json, recovery_result_json, trace_event_ids_json, created_at, completed_at) VALUES ('replacement-r', 'p1', ?, ?, ?, 'candidate-r', ?, ?, ?, '{}', '{}', 'completed', '[\"disposal-r\"]', '{\"activationVerdict\":\"succeeded\"}', '[\"e1\",\"e2\"]', '2030-01-01', '2030-01-04')", tree.treeId, nodeId, nodeRevision.id, tree.revisionId, JSON.stringify([nodeId]), JSON.stringify([nodeId]));
+    database.run("INSERT INTO effect_disposal_results (id, project_id, replacement_id, task_node_effect_id, disposition_action, disposal_capability, disposal_status, evidence_refs_json, residual_impact, created_at) VALUES ('disposal-r', 'p1', 'replacement-r', 'effect-r', 'inverse_applied', 'auto_reversible', 'disposed', '[\"e2\"]', '', '2030-01-03')");
+    database.run("INSERT INTO task_node_composition_transitions (id, project_id, tree_id, task_node_id, task_node_revision_id, from_state, to_state, reason, replacement_id, created_at) VALUES ('transition-r', 'p1', ?, ?, ?, 'suspending', 'active', 'replacement activated', 'replacement-r', '2030-01-04')", tree.treeId, nodeId, nodeRevision.id);
+
+    expect(service.getTaskNodeEffects("p1", { treeId: tree.treeId, nodeId, effectType: "reversible", disposalStatus: "disposed" }).items)
+      .toEqual([expect.objectContaining({ effectId: "effect-r", capability: "auto_reversible", disposalStatus: "disposed" })]);
+    expect(service.getTaskNodeReplacements("p1", { treeId: tree.treeId, nodeId, status: "completed" }).items)
+      .toEqual([expect.objectContaining({ replacementId: "replacement-r", candidateRevisionId: "candidate-r", status: "completed" })]);
+    expect(service.getTaskNodeReplacementDetail("p1", "replacement-r")).toMatchObject({
+      replacement: { replacementId: "replacement-r", status: "completed", affectedTaskNodeIds: [nodeId] },
+      candidate: { candidateRevisionId: "candidate-r" },
+      effects: [expect.objectContaining({ effectId: "effect-r" })],
+      disposalResults: [expect.objectContaining({ disposalResultId: "disposal-r", status: "disposed" })],
+      compositionTransitions: [expect.objectContaining({ transitionId: "transition-r", toState: "active" })],
+    });
+    expect(() => service.getTaskNodeReplacementDetail("p2", "replacement-r")).toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
 });

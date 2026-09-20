@@ -36,6 +36,10 @@ describe("Harness MCP binding", () => {
       "harness_freeze_skill_candidate", "harness_propose_skill_test_case",
       "harness_validate_skill_test_quality", "harness_record_skill_validation_run",
       "harness_generate_skill_validation_report",
+      "harness_register_task_node_effect", "harness_get_task_node_effects",
+      "harness_preview_task_node_replacement", "harness_confirm_task_node_replacement",
+      "harness_execute_task_node_replacement", "harness_recover_task_node_replacement",
+      "harness_get_task_node_replacements", "harness_get_task_node_replacement_detail",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -64,6 +68,12 @@ describe("Harness MCP binding", () => {
     expect(tools.find((tool) => tool.name === "harness_record_skill_validation_run")?.inputSchema).toMatchObject({
       properties: { runMode: { enum: ["no_skill_baseline", "skill_enabled"] }, sideEffectRisk: { enum: expect.any(Array) } },
     });
+    expect(tools.find((tool) => tool.name === "harness_register_task_node_effect")?.inputSchema).toMatchObject({
+      properties: { effectType: { enum: ["reversible", "version_reversible", "compensatable", "irreversible"] } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_confirm_task_node_replacement")?.inputSchema).toMatchObject({
+      properties: { answer: { enum: ["yes", "no", "pause"] } },
+    });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
     const createdContent = (created as { content: Array<{ type: string; text?: string }> }).content;
@@ -86,6 +96,8 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_failure_cases", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_skill_evolution_candidates", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_task_node_effects", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_task_node_replacements", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {
