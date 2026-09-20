@@ -53,7 +53,7 @@ export function buildExecutionContext(input: {
   const modelId = input.current.modelId ?? input.previous?.modelInfo?.id;
   return {
     runId: input.runId,
-    agentType: input.current.agentType ?? input.previous?.agentType ?? "claude-code",
+    agentType: input.current.agentType ?? "claude-code",
     runtimeBindingId: "claude-code-plugin",
     modelInfo: modelId ? { id: modelId } : null,
     cwd: input.cwd,

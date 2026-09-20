@@ -111,7 +111,7 @@ export class HookIngestionService {
   private latestExecutionContext(projectId: string, runId: string): Partial<ExecutionContext> | undefined {
     const row = this.database.get<{ execution_context_json: string }>(
       `SELECT execution_context_json FROM trace_events
-       WHERE project_id = ? AND session_id = ?
+       WHERE project_id = ? AND session_id = ? AND execution_context_json <> '{}'
        ORDER BY occurred_at DESC, id DESC LIMIT 1`,
       projectId, runId,
     );

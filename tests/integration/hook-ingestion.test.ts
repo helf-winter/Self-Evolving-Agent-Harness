@@ -121,6 +121,10 @@ describe("Claude hook ingestion", () => {
       hook_event_name: "Stop", session_id: "run-context", cwd: directory,
       agent_id: "agent-2", agent_type: "reviewer",
     }));
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit", session_id: "run-context", cwd: directory,
+      prompt: "back in the main agent",
+    }));
 
     const rows = database.all<{ event_name: string; execution_context_json: string }>(
       "SELECT event_name, execution_context_json FROM trace_events WHERE session_id = ? ORDER BY rowid",
@@ -171,6 +175,16 @@ describe("Claude hook ingestion", () => {
           },
         },
       },
+      {
+        eventName: "UserPromptSubmit",
+        context: {
+          runId: "run-context", agentType: "claude-code", runtimeBindingId: "claude-code-plugin",
+          modelInfo: { id: "kimi-k3" }, cwd: directory, launchMethod: "resume",
+          environment: {
+            platform: process.platform, architecture: process.arch, nodeVersion: process.version,
+          },
+        },
+      },
     ]);
     database.close();
   });
@@ -199,6 +213,28 @@ describe("Claude hook ingestion", () => {
     )!.execution_context_json);
     expect(context.modelInfo).toBeNull();
     expect(context.launchMethod).toBeNull();
+    database.close();
+  });
+
+  it("inherits through synthetic Trace Events that have no Execution Context", async () => {
+    const { directory, database, service } = await fixture();
+    const { project, tree } = await activeTree(directory, database);
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "SessionStart", session_id: "run-synthetic-gap", cwd: directory,
+      model: "glm-5.3", source: "startup",
+    }));
+    database.run(
+      "INSERT INTO trace_events (id, project_id, tree_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('synthetic-gap', ?, ?, 'run-synthetic-gap', 'planning', '{}', ?, 'synthetic-gap')",
+      project.projectId, tree.treeId, new Date().toISOString(),
+    );
+    const prompt = await service.ingest(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit", session_id: "run-synthetic-gap", cwd: directory,
+      prompt: "continue after planning",
+    }));
+    if (!prompt.recorded) throw new Error("prompt Trace was not recorded");
+    expect(JSON.parse(database.get<{ execution_context_json: string }>(
+      "SELECT execution_context_json FROM trace_events WHERE id = ?", prompt.eventId,
+    )!.execution_context_json)).toMatchObject({ modelInfo: { id: "glm-5.3" }, launchMethod: "startup" });
     database.close();
   });
 
