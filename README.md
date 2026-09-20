@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract，以及 Task Tree Refinement Loop 十一个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop，以及 Trace Execution Context 十二个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -13,9 +13,10 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - 分支确认记录不可变；节点确认状态与执行状态分离，支持 `draft`、`pending_user_confirmation`、`confirmed`、`partial_confirmed`；
 - 修改一个已确认分支时，仅该分支重新确认，未变化兄弟分支保留确认；跨分支依赖未确认时节点处于 `blocked_by_unconfirmed_dependency`；
 - Claude 生命周期 Hook 的幂等、脱敏 Trace 与 Artifact 投影；
+- Trace Event 保存隐私受限的 Execution Context 快照；同一 Project/run 内继承启动模型与方式，模型切换后更新后续事件，且不保存 transcript、任意环境变量或底层模型完整请求响应；
 - 修订绑定的 Artifact Graph：Task Link、Artifact Relation、Contract、规划基线和 Trace 来源；
 - 确定性 Hook 自动识别未规划 Artifact，语义 Drift 可由 Agent 显式记录；阻断 Drift 会暂停节点等待用户确认；
-- Snapshot、Task Tree、Artifact Graph、Artifact Detail、Plan Drift 与分页 Trace 查询，全部严格按 Project 隔离；
+- Snapshot、Task Tree、Artifact Graph、Artifact Detail、Plan Drift 与分页 Trace 查询，Trace 可按 `runId` 筛选并返回事件级 Execution Context，全部严格按 Project 隔离；
 - 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
 - 未解决的阻断 Drift 会把成功提议记录为 `uncertain`，Evaluation 不能绕过确认门禁；
 - Runtime Action 将自然语言意图转换为可校验的结构化状态变更；阻断 Drift Resolution 和 Scope Change 必须绑定明确的确认提示与用户回答 Trace；
@@ -39,7 +40,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 
 - Bash / WSL 优先；Windows PowerShell 也可用于开发。
 - Node.js `22.13.0` 或更高版本。
-- Claude Code。模型登录和 API 配置仍由 Claude Code 自己负责，Harness 不保存模型密钥。
+- Claude Code `2.1.251` 或更高版本（Execution Context 的模型切换记录依赖 `PostModelSwitch` Hook）。模型登录和 API 配置仍由 Claude Code 自己负责，Harness 不保存模型密钥。
 
 ## 安装与验证
 
@@ -223,6 +224,12 @@ claude --plugin-dir ./plugin
 可使用 `/agent-harness:taskroot 任务名称` 显式新建根任务。普通 coding 请求会由 `task-tree-planning` Skill 引导：先判断新建还是归并、精炼完整树、运行就绪扫描、请求确认，再先做 Skeleton、后按分支深入执行。普通问答不会自动创建 Task Tree。
 
 MCP 和 Hooks 使用 `${CLAUDE_PLUGIN_ROOT}/runtime` 内的自包含构建产物，不依赖启动目录中的相对脚本。
+
+### Trace Execution Context
+
+`SessionStart` 记录当前模型和启动方式，`PostModelSwitch` 更新当前模型；同一 Project、同一 `runId` 的后续 Hook Event 从最近事实继承这些会话级字段。每条事件仍保存自己的 `cwd`、permission mode、effort、prompt ID 和 agent 信息。`harness_get_trace_events` 可用 `runId`、`treeId` 或 `nodeId` 缩小范围，并在每条结果的 `executionContext` 中返回当时快照。
+
+Execution Context 只保存允许字段：平台、架构、Node 版本和 Claude Hook 明确提供的运行元信息。Transcript、scratchpad 路径、任意进程环境变量、API 配置、模型提示词与完整请求响应不会进入该字段。
 
 ## 开发命令
 

@@ -313,10 +313,10 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
   })));
 
   server.registerTool("harness_get_trace_events", {
-    description: "Get paginated redacted Trace facts for the current project.",
-    inputSchema: { cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional() },
-  }, ({ cwd, treeId, nodeId, limit, cursor }) => guarded(async () => runtime.queries.getTraceEvents((await existingProject(cwd)).projectId, {
-    ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+    description: "Get paginated redacted Trace facts and Execution Context snapshots for the current project.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(), runId: z.string().optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional() },
+  }, ({ cwd, treeId, nodeId, runId, limit, cursor }) => guarded(async () => runtime.queries.getTraceEvents((await existingProject(cwd)).projectId, {
+    ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(runId ? { runId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
   })));
 
   server.registerTool("harness_get_artifact_graph", {

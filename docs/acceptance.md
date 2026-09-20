@@ -198,14 +198,33 @@ harness node evaluate ATTEMPT_ID succeeded --json
 npm test -- --run tests/unit/task-refinement.test.ts tests/integration/task-tree-service.test.ts tests/e2e/task-tree-refinement.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 12. 安全检查
+## 12. Trace Execution Context
+
+在一个已有活跃 Task Tree 的 Claude 会话中验证：
+
+前置条件：Claude Code 版本不低于 `2.1.251`；更旧版本不支持 `PostModelSwitch`，不属于本切片的兼容范围。
+
+1. 以指定模型启动会话；确认 `SessionStart` Trace 的 `executionContext` 包含 `runId`、`claude-code-plugin` Binding、模型、`cwd` 和启动方式。
+2. 产生后续 Prompt 或工具事件；确认同一 Project、同一 `runId` 会继承最近的模型和启动方式，但每条事件使用自己的 `cwd` 与事件级环境字段。
+3. 使用 `/model` 切换模型；确认 `PostModelSwitch` 保存前后模型与切换来源，之后的事件继承新模型，历史事件快照不被改写。
+4. 重启 Runtime 后继续同一 `runId`；调用 `harness_get_trace_events` 并按 `runId` 筛选，确认模型连续性仍可恢复。
+5. 在另一个 Project 使用相同 `runId`；确认不会继承前一 Project 的模型、启动方式或 Trace。
+6. 在 Hook 输入中加入 transcript、scratchpad、未知环境字段和测试密钥；确认它们不会进入 Execution Context，已允许字段仍经过统一脱敏。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/hook-ingestion.test.ts tests/integration/runtime-query.test.ts tests/e2e/trace-execution-context.test.ts tests/plugin/mcp.test.ts tests/plugin/plugin-contract.test.ts
+```
+
+## 13. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 13. 当前不作为验收失败的范围
+## 14. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

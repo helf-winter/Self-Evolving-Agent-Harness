@@ -7,6 +7,7 @@
     "PreToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
     "PostToolUseFailure": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
+    "PostModelSwitch": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
     "StopFailure": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }],
     "SessionEnd": [{ "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs\"", "timeout": 10 }] }]

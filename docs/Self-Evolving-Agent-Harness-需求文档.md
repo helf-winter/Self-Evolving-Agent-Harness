@@ -2951,6 +2951,7 @@ Runtime Action 接口必须对 `action_type`、`target_id`、`expected_revision`
 
 - 优先支持 Bash 环境；
 - 需要支持 WSL 场景下的 Windows 路径与 Linux 路径映射；
+- 当前 Claude Code Binding 以 `2.1.251` 为最低兼容版本；模型切换事实依赖该版本引入的 `PostModelSwitch` Hook，旧版本不得被误报为完整支持；
 - 初期以本地项目为主，不要求云端多用户协作；
 - Runtime Records 必须集中存储在 Harness 公共数据库中，不得要求每个代码项目生成 `.harness` 数据目录；
 - 允许每个 Project Root 存在一个 `.agent-harness-project.json` 最小身份文件；除此之外不得在项目中保存 Harness Runtime Records；

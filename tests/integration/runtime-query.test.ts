@@ -17,8 +17,11 @@ async function fixture() {
   database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p2', '/b', 'now', 'now')");
   const tree = await new TaskTreeService(database).createTaskRoot({ projectId: "p1", title: "Runtime" });
   database.run("INSERT INTO runtime_confirmation_prompts (id, project_id, tree_id, scope_id, prompt, status, created_at) VALUES ('c1', 'p1', ?, ?, 'Execute?', 'pending', 'now')", tree.treeId, tree.treeId);
-  for (const [id, at] of [["e1", "2026-01-01"], ["e2", "2026-01-02"]] as const) {
-    database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES (?, 'p1', ?, ?, 's', 'PostToolUse', '{}', ?, ?)", id, tree.treeId, tree.document.nodes[0]!.id, at, `k-${id}`);
+  for (const [id, at, runId, context] of [
+    ["e1", "2026-01-01", "run-a", { runId: "run-a", modelInfo: { id: "glm-5.3" } }],
+    ["e2", "2026-01-02", "run-b", { runId: "run-b", modelInfo: { id: "kimi-k3" } }],
+  ] as const) {
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, execution_context_json, occurred_at, idempotency_key) VALUES (?, 'p1', ?, ?, ?, 'PostToolUse', '{}', ?, ?, ?)", id, tree.treeId, tree.document.nodes[0]!.id, runId, JSON.stringify(context), at, `k-${id}`);
   }
   const nodeId = tree.document.nodes[0]!.id;
   const nodeRevision = database.get<{ id: string }>("SELECT id FROM task_node_revisions WHERE node_id = ?", nodeId)!;
@@ -66,6 +69,9 @@ describe("RuntimeQueryService", () => {
     expect(detail.evaluations).toEqual([expect.objectContaining({ evaluationId: "v1", attemptId: "a1", verdict: "failed" })]);
     expect(detail.nextCursor).toBeTruthy();
     expect(service.getTraceEvents("p1", { limit: 10 }).items.map((event) => event.eventId)).toContain("e1");
+    expect(service.getTraceEvents("p1", { runId: "run-a", limit: 10 }).items).toEqual([
+      expect.objectContaining({ eventId: "e1", sessionId: "run-a", executionContext: { runId: "run-a", modelInfo: { id: "glm-5.3" } } }),
+    ]);
     const nodeRevision = database.get<{ id: string }>("SELECT id FROM task_node_revisions WHERE node_id = ?", nodeId)!;
     database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at, completed_at) VALUES ('a2', 'p1', ?, ?, ?, 2, 'aborted', '2026-01-05', '2026-01-06')", tree.treeId, nodeId, nodeRevision.id);
     database.run("INSERT INTO evaluations (id, project_id, tree_id, task_node_id, task_node_revision_id, execution_attempt_id, verdict, evidence_refs_json, covered_required_evidence_json, missing_required_evidence_json, risk_summary, created_at) VALUES ('v2', 'p1', ?, ?, ?, 'a2', 'uncertain', '[]', '[]', '[]', '', '2026-01-06')", tree.treeId, nodeId, nodeRevision.id);

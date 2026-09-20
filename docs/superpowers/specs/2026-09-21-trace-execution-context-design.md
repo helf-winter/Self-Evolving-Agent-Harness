@@ -26,10 +26,11 @@ Trace queries may filter by `runId` and return the decoded context on each item.
 
 The mapper accepts current common fields (`prompt_id`, `permission_mode`, `effort`, `agent_id`, `agent_type`) plus `SessionStart` model/source and `PostModelSwitch` from/to/source. The plugin registers `PostModelSwitch` in addition to its existing lifecycle hooks. Unknown extra fields are ignored.
 
+`PostModelSwitch` requires Claude Code 2.1.251 or later. The plugin therefore declares 2.1.251 as its minimum supported Claude Code version for this slice; older validators reject the event key rather than silently ignoring it.
+
 ## Failure and privacy rules
 
 - Context participates in the existing Hook idempotency key, so a duplicate Hook cannot create a second fact.
 - Context fields pass through the same recursive secret redaction used by Trace payloads.
 - Invalid optional values are ignored rather than rejecting otherwise valid lifecycle evidence.
 - No query can select another Project's context by run ID.
-

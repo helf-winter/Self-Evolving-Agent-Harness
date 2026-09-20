@@ -13,6 +13,7 @@ interface TraceRow {
   session_id: string;
   event_name: string;
   payload_json: string;
+  execution_context_json: string;
   occurred_at: string;
 }
 
@@ -235,7 +236,7 @@ export class RuntimeQueryService {
     };
   }
 
-  getTraceEvents(projectId: string, query: { limit?: number; cursor?: string; treeId?: string; nodeId?: string }) {
+  getTraceEvents(projectId: string, query: { limit?: number; cursor?: string; treeId?: string; nodeId?: string; runId?: string }) {
     this.requireProject(projectId);
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
     const offset = decodeCursor(query.cursor);
@@ -243,15 +244,17 @@ export class RuntimeQueryService {
     const params: Array<string | number> = [projectId];
     if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
     if (query.nodeId) { filters.push("node_id = ?"); params.push(query.nodeId); }
+    if (query.runId) { filters.push("session_id = ?"); params.push(query.runId); }
     const rows = this.database.all<TraceRow>(
-      `SELECT id, tree_id, node_id, session_id, event_name, payload_json, occurred_at
+      `SELECT id, tree_id, node_id, session_id, event_name, payload_json, execution_context_json, occurred_at
        FROM trace_events WHERE ${filters.join(" AND ")} ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?`,
       ...params, limit + 1, offset,
     );
     const hasMore = rows.length > limit;
     const items = rows.slice(0, limit).map((row) => ({
       eventId: row.id, treeId: row.tree_id, nodeId: row.node_id, sessionId: row.session_id,
-      eventName: row.event_name, payload: JSON.parse(row.payload_json) as unknown, occurredAt: row.occurred_at,
+      eventName: row.event_name, payload: JSON.parse(row.payload_json) as unknown,
+      executionContext: JSON.parse(row.execution_context_json) as unknown, occurredAt: row.occurred_at,
     }));
     return { items, nextCursor: hasMore ? encodeCursor(offset + limit) : null };
   }

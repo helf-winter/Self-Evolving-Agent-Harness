@@ -14,7 +14,7 @@ describe("Claude plugin contract", () => {
     expect(mcp.mcpServers["agent-harness"]?.args.join(" ")).toContain("${CLAUDE_PLUGIN_ROOT}/runtime/mcp.mjs");
     const hooksText = await readFile(path.join(root, "hooks", "hooks.json"), "utf8");
     const hooks = JSON.parse(hooksText) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
-    expect(Object.keys(hooks.hooks).sort()).toEqual(["PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptExpansion", "UserPromptSubmit"].sort());
+    expect(Object.keys(hooks.hooks).sort()).toEqual(["PostModelSwitch", "PostToolUse", "PostToolUseFailure", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "StopFailure", "UserPromptExpansion", "UserPromptSubmit"].sort());
     for (const registrations of Object.values(hooks.hooks)) {
       for (const registration of registrations) for (const hook of registration.hooks) {
         expect(hook.command).toContain("${CLAUDE_PLUGIN_ROOT}/runtime/hook.mjs");
