@@ -24,6 +24,7 @@ export type HarnessErrorCode =
   | "skill_validation_rejected"
   | "effect_invalid"
   | "replacement_invalid"
+  | "project_clone_invalid"
   | "database_busy"
   | "storage_failure";
 
