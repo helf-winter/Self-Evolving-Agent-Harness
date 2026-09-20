@@ -29,6 +29,25 @@ function addEvaluation(database: RuntimeDatabase, sequence: number, verdict: "fa
   return { attemptId, evaluationId };
 }
 
+function addTrace(database: RuntimeDatabase, id: string, projectId = "p1", occurredAt = "2099-01-01T00:00:00.000Z") {
+  database.run(
+    "INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES (?, ?, ?, ?, 'validation', 'PostToolUse', '{}', ?, ?)",
+    id, projectId, projectId === "p1" ? "t1" : null, projectId === "p1" ? "n1" : null, occurredAt, id,
+  );
+}
+
+function eligibleCandidate(database: RuntimeDatabase, service: EvolutionService) {
+  addEvaluation(database, 1, "failed"); addEvaluation(database, 2, "failed");
+  const success = addEvaluation(database, 3, "succeeded");
+  const experience = service.captureEligibleExperienceWithinTransaction({ projectId: "p1", successEvaluationId: success.evaluationId });
+  if (!experience.eligible) throw new Error("experience was not eligible");
+  return service.freezeSkillCandidate({
+    projectId: "p1", experienceId: experience.experienceId, stableKey: "endpoint-repair",
+    name: "Endpoint repair", triggerContext: { taskType: "typescript-test-failure" },
+    instructionSnapshot: "Reproduce the focused failure before changing implementation.",
+  });
+}
+
 afterEach(async () => Promise.all(dirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
 
 describe("EvolutionService Experience and candidate lifecycle", () => {
@@ -80,6 +99,92 @@ describe("EvolutionService Experience and candidate lifecycle", () => {
       projectId: "p2", experienceId: experience.experienceId, stableKey: "foreign",
       name: "Foreign", triggerContext: {}, instructionSnapshot: "Do work",
     })).toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
+
+  it("keeps generated test definitions draft until evidence passes every quality gate", async () => {
+    const { database, service } = await fixture();
+    const candidate = eligibleCandidate(database, service);
+    const testCase = service.proposeSkillTestCase({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId,
+      testType: "real_failure_replay", sourceRefs: ["failure-case-1"],
+      targetBehavior: "repairs the original deterministic failure", applicableContext: { language: "typescript" },
+      fixtureSetup: { repository: "fixture" }, input: { command: "npm test" },
+      expectedResult: { exitCode: 0 }, oracle: { kind: "exit_code", value: 0 },
+      reproductionCommand: "npm test -- endpoint", timeoutMs: 30_000,
+      generatedBy: "agent", leakagePolicy: "candidate instructions excluded from holdout authoring",
+    });
+    expect(testCase).toMatchObject({ testType: "real_failure_replay", qualityStatus: "draft", created: true });
+    expect(service.proposeSkillTestCase({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId,
+      testType: "real_failure_replay", sourceRefs: ["failure-case-1"],
+      targetBehavior: "repairs the original deterministic failure", applicableContext: { language: "typescript" },
+      fixtureSetup: { repository: "fixture" }, input: { command: "npm test" },
+      expectedResult: { exitCode: 0 }, oracle: { kind: "exit_code", value: 0 },
+      reproductionCommand: "npm test -- endpoint", timeoutMs: 30_000,
+      generatedBy: "agent", leakagePolicy: "candidate instructions excluded from holdout authoring",
+    })).toMatchObject({ testCaseId: testCase.testCaseId, created: false });
+
+    addTrace(database, "quality-evidence");
+    const accepted = service.validateSkillTestQuality({
+      projectId: "p1", skillTestCaseId: testCase.testCaseId, idempotencyKey: "quality-1",
+      schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
+      discriminative: true, stable: true, splitValid: true, evidenceRefs: ["quality-evidence"],
+    });
+    expect(accepted).toMatchObject({ verdict: "accepted", qualityStatus: "accepted", created: true });
+    expect(service.validateSkillTestQuality({
+      projectId: "p1", skillTestCaseId: testCase.testCaseId, idempotencyKey: "quality-1",
+      schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
+      discriminative: true, stable: true, splitValid: true, evidenceRefs: ["quality-evidence"],
+    })).toMatchObject({ qualityResultId: accepted.qualityResultId, created: false });
+    database.close();
+  });
+
+  it("rejects foreign or early quality evidence and records validation runs only for accepted cases", async () => {
+    const { database, service } = await fixture();
+    const candidate = eligibleCandidate(database, service);
+    const testCase = service.proposeSkillTestCase({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId,
+      testType: "holdout", sourceRefs: ["independent-scenario"], targetBehavior: "generalizes",
+      applicableContext: {}, fixtureSetup: {}, input: {}, expectedResult: { pass: true },
+      oracle: { kind: "predicate" }, reproductionCommand: "npm test -- holdout", timeoutMs: 30_000,
+      generatedBy: "independent-agent", leakagePolicy: "no candidate instruction access",
+    });
+    addTrace(database, "early", "p1", "2000-01-01T00:00:00.000Z");
+    addTrace(database, "foreign", "p2");
+    expect(() => service.validateSkillTestQuality({
+      projectId: "p1", skillTestCaseId: testCase.testCaseId, idempotencyKey: "bad-quality",
+      schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
+      discriminative: true, stable: true, splitValid: true, evidenceRefs: ["early", "foreign"],
+    })).toThrow(expect.objectContaining({ code: "evidence_scope_mismatch" }));
+    expect(() => service.recordSkillValidationRun({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
+      runMode: "skill_enabled", repetitionIndex: 1, verdict: "passed", tokenUsage: 20, toolCallCount: 2,
+      sideEffectRisk: "none", sideEffectSummary: "isolated fixture", evidenceRefs: ["early"],
+    })).toThrow(expect.objectContaining({ code: "skill_test_invalid" }));
+
+    addTrace(database, "quality-ok"); addTrace(database, "run-ok");
+    service.validateSkillTestQuality({
+      projectId: "p1", skillTestCaseId: testCase.testCaseId, idempotencyKey: "quality-ok",
+      schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
+      discriminative: true, stable: true, splitValid: true, evidenceRefs: ["quality-ok"],
+    });
+    const run = service.recordSkillValidationRun({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
+      runMode: "skill_enabled", repetitionIndex: 1, verdict: "passed", tokenUsage: 20, toolCallCount: 2,
+      sideEffectRisk: "none", sideEffectSummary: "isolated fixture", evidenceRefs: ["run-ok"],
+    });
+    expect(run).toMatchObject({ created: true, repetitionIndex: 1, verdict: "passed" });
+    expect(service.recordSkillValidationRun({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
+      runMode: "skill_enabled", repetitionIndex: 1, verdict: "passed", tokenUsage: 20, toolCallCount: 2,
+      sideEffectRisk: "none", sideEffectSummary: "isolated fixture", evidenceRefs: ["run-ok"],
+    })).toMatchObject({ validationRunId: run.validationRunId, created: false });
+    expect(() => service.recordSkillValidationRun({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
+      runMode: "skill_enabled", repetitionIndex: 1, verdict: "failed", tokenUsage: 20, toolCallCount: 2,
+      sideEffectRisk: "none", sideEffectSummary: "different outcome", evidenceRefs: ["run-ok"],
+    })).toThrow(expect.objectContaining({ code: "skill_validation_rejected" }));
     database.close();
   });
 });
