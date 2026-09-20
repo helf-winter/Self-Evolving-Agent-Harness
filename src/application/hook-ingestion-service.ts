@@ -3,6 +3,7 @@ import { newId } from "../domain/ids.js";
 import { canonicalJson, createHookIdempotencyKey, redactSecrets } from "../domain/trace.js";
 import type { ClaudeHookEvent } from "../bindings/claude/hook-mapper.js";
 import type { RuntimeDatabase } from "../storage/database.js";
+import { PlanDriftService } from "./plan-drift-service.js";
 import type { ProjectIdentityService } from "./project-identity-service.js";
 
 interface WorkflowContext {
@@ -11,11 +12,25 @@ interface WorkflowContext {
   selected_node_id: string | null;
 }
 
+interface ArtifactProjection {
+  artifactId: string;
+  kind: "file" | "command";
+  locator: string;
+}
+
 const mutationTools = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 const executableStages = new Set(["skeleton_pass", "skeleton_gate", "branch_implementation", "branch_verification", "root_verification", "final_report"]);
 
 export class HookIngestionService {
-  constructor(private readonly database: RuntimeDatabase, private readonly projects: ProjectIdentityService) {}
+  private readonly drifts: PlanDriftService;
+
+  constructor(
+    private readonly database: RuntimeDatabase,
+    private readonly projects: ProjectIdentityService,
+    drifts?: PlanDriftService,
+  ) {
+    this.drifts = drifts ?? new PlanDriftService(database);
+  }
 
   async ingest(event: ClaudeHookEvent): Promise<
     | { recorded: false; reason: "inactive" | "duplicate" }
@@ -67,13 +82,16 @@ export class HookIngestionService {
         eventId, project.projectId, workflow?.tree_id ?? null, workflow?.selected_node_id ?? null, event.sessionId, eventName, canonicalJson(payload), event.occurredAt, key,
       );
       if (event.eventName === "PostToolUse" || event.eventName === "PostToolUseFailure") {
-        const artifactId = this.projectArtifact(project.projectId, workflow?.tree_id, eventId, event);
-        if (artifactId) {
+        const artifact = this.projectArtifact(project.projectId, workflow?.tree_id, eventId, event);
+        if (artifact) {
           this.database.run(
             "UPDATE trace_events SET payload_json = ? WHERE id = ?",
-            canonicalJson({ ...(payload as Record<string, unknown>), artifactRefs: [artifactId] }),
+            canonicalJson({ ...(payload as Record<string, unknown>), artifactRefs: [artifact.artifactId] }),
             eventId,
           );
+          if (event.eventName === "PostToolUse" && artifact.kind === "file" && this.isMutation(event) && workflow?.tree_id && workflow.selected_node_id) {
+            this.recordAutomaticDrift(project.projectId, workflow.tree_id, workflow.selected_node_id, eventId, artifact);
+          }
         }
       }
     });
@@ -89,7 +107,7 @@ export class HookIngestionService {
     return mutatingCommand.test(command) || outputRedirection.test(command);
   }
 
-  private projectArtifact(projectId: string, treeId: string | undefined, eventId: string, event: ClaudeHookEvent): string | undefined {
+  private projectArtifact(projectId: string, treeId: string | undefined, eventId: string, event: ClaudeHookEvent): ArtifactProjection | undefined {
     let kind: "file" | "command" | undefined;
     let locator: string | undefined;
     const filePath = event.toolInput?.file_path ?? event.toolInput?.path;
@@ -134,7 +152,67 @@ export class HookIngestionService {
       artifactId, projectId, treeId ?? null, kind, locator, status, timestamp, timestamp,
       kind, locator, kind === "command" ? "command_signature" : "path", confidence, eventId,
     );
-    return artifactId;
+    return { artifactId, kind, locator };
+  }
+
+  private recordAutomaticDrift(
+    projectId: string,
+    treeId: string,
+    nodeId: string,
+    sourceTraceEventId: string,
+    artifact: ArtifactProjection,
+  ): void {
+    const activeAttempt = this.database.get<{ id: string }>(
+      "SELECT id FROM execution_attempts WHERE project_id = ? AND tree_id = ? AND task_node_id = ? AND status IN ('running', 'verifying')",
+      projectId, treeId, nodeId,
+    );
+    if (!activeAttempt) return;
+    const revision = this.database.get<{ current_revision_id: string }>(
+      "SELECT current_revision_id FROM task_trees WHERE id = ? AND project_id = ?",
+      treeId, projectId,
+    );
+    if (!revision?.current_revision_id) return;
+    const ownPlan = this.database.get<{ id: string }>(
+      `SELECT id FROM task_node_artifact_links
+       WHERE project_id = ? AND tree_id = ? AND tree_revision_id = ? AND task_node_id = ? AND artifact_id = ?
+       LIMIT 1`,
+      projectId, treeId, revision.current_revision_id, nodeId, artifact.artifactId,
+    );
+    if (ownPlan) return;
+
+    const siblingPlan = this.database.get<{ task_node_id: string; state: string }>(
+      `SELECT l.task_node_id, cs.state
+       FROM task_node_artifact_links l
+       JOIN task_node_confirmation_states cs
+         ON cs.project_id = l.project_id
+        AND cs.tree_id = l.tree_id
+        AND cs.tree_revision_id = l.tree_revision_id
+        AND cs.task_node_id = l.task_node_id
+       WHERE l.project_id = ? AND l.tree_id = ? AND l.tree_revision_id = ?
+         AND l.artifact_id = ? AND l.task_node_id <> ? AND cs.state <> 'confirmed'
+       LIMIT 1`,
+      projectId, treeId, revision.current_revision_id, artifact.artifactId, nodeId,
+    );
+    const blocking = Boolean(siblingPlan);
+    this.drifts.recordDriftWithinTransaction({
+      projectId,
+      treeId,
+      nodeId,
+      plannedArtifactId: siblingPlan ? artifact.artifactId : null,
+      actualArtifactId: artifact.artifactId,
+      driftType: "unexpected_artifact",
+      severity: blocking ? "blocking" : "warning",
+      description: blocking
+        ? `Mutation of ${artifact.locator} crosses into an unconfirmed sibling branch`
+        : `Mutation of ${artifact.locator} is outside the selected Task Node plan`,
+      explanation: blocking
+        ? `The Artifact is planned by Task Node ${siblingPlan!.task_node_id}, whose current revision is not confirmed.`
+        : "The current Task Tree revision has no Artifact link between this locator and the active Task Node.",
+      recommendation: blocking
+        ? "Ask the user whether to revise the selected branch, confirm the sibling branch, or cancel the change."
+        : "Review the change and update the Task Tree plan if it is intentional.",
+      sourceTraceEventId,
+    });
   }
 
   private normalizeFileLocator(cwd: string, filePath: string): string {

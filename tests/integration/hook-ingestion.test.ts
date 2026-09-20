@@ -18,6 +18,40 @@ async function fixture() {
   const service = new HookIngestionService(database, new ProjectIdentityService(database));
   return { directory, database, service };
 }
+
+async function activeTree(directory: string, database: RuntimeDatabase) {
+  const identity = new ProjectIdentityService(database);
+  const project = await identity.resolve(directory, "persist");
+  const tree = await new TaskTreeService(database).createTaskRoot({ projectId: project.projectId, title: "Runtime" });
+  const nodeId = tree.document.nodes[0]!.id;
+  const nodeRevisionId = database.get<{ id: string }>(
+    "SELECT id FROM task_node_revisions WHERE node_id = ? AND tree_revision_id = ?",
+    nodeId, tree.revisionId,
+  )!.id;
+  database.run("UPDATE task_nodes SET status = 'running' WHERE id = ?", nodeId);
+  database.run(
+    "INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at) VALUES (?, ?, ?, ?, ?, 1, 'running', 'now')",
+    `attempt-${nodeId}`, project.projectId, tree.treeId, nodeId, nodeRevisionId,
+  );
+  return { project, tree, nodeId, nodeRevisionId };
+}
+
+function linkPlannedFile(database: RuntimeDatabase, input: {
+  projectId: string; treeId: string; treeRevisionId: string; nodeId: string; nodeRevisionId: string; artifactId: string; locator: string;
+}) {
+  database.run(
+    "INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'file', ?, 'planned', '{}', 'now', 'now')",
+    input.artifactId, input.projectId, input.treeId, input.locator,
+  );
+  database.run(
+    `INSERT INTO task_node_artifact_links (
+       id, project_id, tree_id, tree_revision_id, task_node_id, task_node_revision_id,
+       artifact_id, relation_type, source_planning_revision_id, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'modifies', ?, 'now')`,
+    `link-${input.artifactId}`, input.projectId, input.treeId, input.treeRevisionId, input.nodeId, input.nodeRevisionId,
+    input.artifactId, input.treeRevisionId,
+  );
+}
 afterEach(async () => {
   for (const database of databases.splice(0)) {
     try {
@@ -113,5 +147,70 @@ describe("Claude hook ingestion", () => {
       "SELECT status, confidence, source_trace_event_id FROM artifacts WHERE kind = 'command'",
     )).toEqual({ status: "verified", confidence: "verified", source_trace_event_id: result.eventId });
     database.close();
+  });
+
+  it("does not record Drift when a mutation matches the selected node plan", async () => {
+    const { directory, database, service } = await fixture();
+    const { project, tree, nodeId, nodeRevisionId } = await activeTree(directory, database);
+    linkPlannedFile(database, {
+      projectId: project.projectId, treeId: tree.treeId, treeRevisionId: tree.revisionId,
+      nodeId, nodeRevisionId, artifactId: "own-file", locator: "src/owned.ts",
+    });
+
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "s1", cwd: directory, tool_name: "Edit", tool_use_id: "owned-edit",
+      tool_input: { file_path: path.join(directory, "src", "owned.ts") }, tool_response: { ok: true },
+    }));
+
+    expect(database.all("SELECT id FROM plan_drift_records")).toEqual([]);
+  });
+
+  it("records warning Drift for an unplanned mutation", async () => {
+    const { directory, database, service } = await fixture();
+    const { nodeId } = await activeTree(directory, database);
+
+    const event = mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "s1", cwd: directory, tool_name: "Write", tool_use_id: "unplanned-write",
+      tool_input: { file_path: path.join(directory, "src", "surprise.ts") }, tool_response: { ok: true },
+    });
+    await service.ingest(event);
+    expect(await service.ingest(event)).toEqual({ recorded: false, reason: "duplicate" });
+
+    expect(database.get<{ severity: string; resolution_status: string; task_node_id: string }>(
+      "SELECT severity, resolution_status, task_node_id FROM plan_drift_records",
+    )).toEqual({ severity: "warning", resolution_status: "recorded", task_node_id: nodeId });
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM plan_drift_records")).toEqual({ count: 1 });
+    expect(database.get<{ count: number }>("SELECT count(*) AS count FROM trace_events")).toEqual({ count: 2 });
+    expect(database.get<{ status: string }>("SELECT status FROM execution_attempts WHERE task_node_id = ?", nodeId)).toEqual({ status: "running" });
+  });
+
+  it("records blocking Drift when a mutation belongs to an unconfirmed sibling branch", async () => {
+    const { directory, database, service } = await fixture();
+    const { project, tree, nodeId } = await activeTree(directory, database);
+    database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES ('sibling', ?, ?, 'Sibling', 'draft')", tree.treeId, nodeId);
+    database.run("INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES ('sibling-r1', 'sibling', ?, '{}', 'now')", tree.revisionId);
+    database.run(
+      "INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES (?, ?, ?, 'sibling', 'draft', 'now')",
+      project.projectId, tree.treeId, tree.revisionId,
+    );
+    linkPlannedFile(database, {
+      projectId: project.projectId, treeId: tree.treeId, treeRevisionId: tree.revisionId,
+      nodeId: "sibling", nodeRevisionId: "sibling-r1", artifactId: "sibling-file", locator: "src/sibling.ts",
+    });
+
+    const source = await service.ingest(mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "s1", cwd: directory, tool_name: "Edit", tool_use_id: "sibling-edit",
+      tool_input: { file_path: path.join(directory, "src", "sibling.ts") }, tool_response: { ok: true },
+    }));
+    if (!source.recorded) throw new Error("sibling edit was not recorded");
+
+    const drift = database.get<{ severity: string; resolution_status: string; trace_event_id: string; task_node_id: string }>(
+      "SELECT severity, resolution_status, trace_event_id, task_node_id FROM plan_drift_records",
+    );
+    expect(drift).toMatchObject({ severity: "blocking", resolution_status: "pending_user_confirmation", task_node_id: nodeId });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = ?", nodeId)).toEqual({ status: "blocked" });
+    expect(database.get<{ status: string }>("SELECT status FROM execution_attempts WHERE task_node_id = ?", nodeId)).toEqual({ status: "blocked" });
+    expect(JSON.parse(database.get<{ payload_json: string }>("SELECT payload_json FROM trace_events WHERE id = ?", drift!.trace_event_id)!.payload_json))
+      .toMatchObject({ sourceTraceEventId: source.eventId, actualArtifactId: "sibling-file" });
   });
 });
