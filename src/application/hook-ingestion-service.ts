@@ -1,4 +1,5 @@
 import path from "node:path";
+import { buildExecutionContext, type ExecutionContext } from "../domain/execution-context.js";
 import { newId } from "../domain/ids.js";
 import { canonicalJson, createHookIdempotencyKey, redactSecrets } from "../domain/trace.js";
 import type { ClaudeHookEvent } from "../bindings/claude/hook-mapper.js";
@@ -75,12 +76,20 @@ export class HookIngestionService {
       ...(event.prompt ? { prompt: event.prompt } : {}),
       ...(violation ? { reason: "mutation_before_confirmed_executable_scope" } : {}),
     });
+    const previousContext = this.latestExecutionContext(project.projectId, event.sessionId);
+    const executionContext = redactSecrets(buildExecutionContext({
+      runId: event.sessionId,
+      cwd: event.cwd,
+      current: event.runtimeContext,
+      ...(previousContext ? { previous: previousContext } : {}),
+    }));
 
     this.database.transaction(() => {
       this.database.run("INSERT INTO hook_receipts (idempotency_key, event_name, received_at) VALUES (?, ?, ?)", key, event.eventName, event.occurredAt);
       this.database.run(
-        "INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        eventId, project.projectId, workflow?.tree_id ?? null, workflow?.selected_node_id ?? null, event.sessionId, eventName, canonicalJson(payload), event.occurredAt, key,
+        "INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, execution_context_json, occurred_at, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        eventId, project.projectId, workflow?.tree_id ?? null, workflow?.selected_node_id ?? null, event.sessionId, eventName,
+        canonicalJson(payload), canonicalJson(executionContext), event.occurredAt, key,
       );
       if (event.eventName === "PostToolUse" || event.eventName === "PostToolUseFailure") {
         const artifact = this.projectArtifact(project.projectId, workflow?.tree_id, eventId, event);
@@ -97,6 +106,22 @@ export class HookIngestionService {
       }
     });
     return { recorded: true, eventId, violation, blocked: false };
+  }
+
+  private latestExecutionContext(projectId: string, runId: string): Partial<ExecutionContext> | undefined {
+    const row = this.database.get<{ execution_context_json: string }>(
+      `SELECT execution_context_json FROM trace_events
+       WHERE project_id = ? AND session_id = ?
+       ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+      projectId, runId,
+    );
+    if (!row) return undefined;
+    try {
+      const value = JSON.parse(row.execution_context_json) as unknown;
+      return value && typeof value === "object" ? value as Partial<ExecutionContext> : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private isMutation(event: ClaudeHookEvent): boolean {

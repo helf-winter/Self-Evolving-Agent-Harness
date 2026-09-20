@@ -1,4 +1,5 @@
 import { HarnessError } from "../../domain/errors.js";
+import type { EffortLevel, PermissionMode, RuntimeEventContext } from "../../domain/execution-context.js";
 
 const eventNames = [
   "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PostToolUse",
@@ -6,9 +7,6 @@ const eventNames = [
 ] as const;
 
 export type ClaudeHookEventName = (typeof eventNames)[number];
-
-type PermissionMode = "default" | "plan" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions";
-type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ClaudeHookEvent {
   eventName: ClaudeHookEventName;
@@ -20,17 +18,7 @@ export interface ClaudeHookEvent {
   toolInput?: Record<string, unknown>;
   toolResponse?: unknown;
   occurredAt: string;
-  runtimeContext: {
-    promptId?: string;
-    permissionMode?: PermissionMode;
-    effortLevel?: EffortLevel;
-    agentId?: string;
-    agentType?: string;
-    modelId?: string;
-    previousModelId?: string;
-    launchMethod?: string;
-    modelSwitchSource?: string;
-  };
+  runtimeContext: RuntimeEventContext;
 }
 
 const permissionModes = new Set(["default", "plan", "acceptEdits", "auto", "dontAsk", "bypassPermissions"]);

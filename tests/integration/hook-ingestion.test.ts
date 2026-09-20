@@ -101,6 +101,107 @@ describe("Claude hook ingestion", () => {
     database.close();
   });
 
+  it("persists an immutable Execution Context snapshot and carries model state across one Project run", async () => {
+    const { directory, database, service } = await fixture();
+    await activeTree(directory, database);
+
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "SessionStart", session_id: "run-context", cwd: directory,
+      model: "glm-5.3", source: "resume", permission_mode: "plan", effort: { level: "high" },
+    }));
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit", session_id: "run-context", cwd: directory,
+      prompt_id: "prompt-2", prompt: "continue",
+    }));
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "PostModelSwitch", session_id: "run-context", cwd: directory,
+      from_model: "glm-5.3", to_model: "kimi-k3", source: "command",
+    }));
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "Stop", session_id: "run-context", cwd: directory,
+      agent_id: "agent-2", agent_type: "reviewer",
+    }));
+
+    const rows = database.all<{ event_name: string; execution_context_json: string }>(
+      "SELECT event_name, execution_context_json FROM trace_events WHERE session_id = ? ORDER BY rowid",
+      "run-context",
+    );
+    expect(rows.map((row) => ({ eventName: row.event_name, context: JSON.parse(row.execution_context_json) }))).toEqual([
+      {
+        eventName: "SessionStart",
+        context: {
+          runId: "run-context", agentType: "claude-code", runtimeBindingId: "claude-code-plugin",
+          modelInfo: { id: "glm-5.3" }, cwd: directory, launchMethod: "resume",
+          environment: {
+            platform: process.platform, architecture: process.arch, nodeVersion: process.version,
+            permissionMode: "plan", effortLevel: "high",
+          },
+        },
+      },
+      {
+        eventName: "UserPromptSubmit",
+        context: {
+          runId: "run-context", agentType: "claude-code", runtimeBindingId: "claude-code-plugin",
+          modelInfo: { id: "glm-5.3" }, cwd: directory, launchMethod: "resume",
+          environment: {
+            platform: process.platform, architecture: process.arch, nodeVersion: process.version,
+            promptId: "prompt-2",
+          },
+        },
+      },
+      {
+        eventName: "PostModelSwitch",
+        context: {
+          runId: "run-context", agentType: "claude-code", runtimeBindingId: "claude-code-plugin",
+          modelInfo: { id: "kimi-k3" }, cwd: directory, launchMethod: "resume",
+          environment: {
+            platform: process.platform, architecture: process.arch, nodeVersion: process.version,
+            previousModelId: "glm-5.3", modelSwitchSource: "command",
+          },
+        },
+      },
+      {
+        eventName: "Stop",
+        context: {
+          runId: "run-context", agentType: "reviewer", runtimeBindingId: "claude-code-plugin",
+          modelInfo: { id: "kimi-k3" }, cwd: directory, launchMethod: "resume",
+          environment: {
+            platform: process.platform, architecture: process.arch, nodeVersion: process.version,
+            agentId: "agent-2",
+          },
+        },
+      },
+    ]);
+    database.close();
+  });
+
+  it("never inherits Execution Context model state across Project boundaries", async () => {
+    const { directory: firstDirectory, database, service } = await fixture();
+    const secondDirectory = await mkdtemp(path.join(tmpdir(), "harness-hook-second-"));
+    dirs.push(secondDirectory);
+    await activeTree(firstDirectory, database);
+    await activeTree(secondDirectory, database);
+
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "SessionStart", session_id: "shared-run", cwd: firstDirectory,
+      model: "glm-5.3", source: "startup",
+    }));
+    await service.ingest(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit", session_id: "shared-run", cwd: secondDirectory,
+      prompt: "do not inherit",
+    }));
+
+    const secondProject = await new ProjectIdentityService(database).resolve(secondDirectory, "inspect");
+    if (secondProject.status !== "same_project") throw new Error("second project was not resolved");
+    const context = JSON.parse(database.get<{ execution_context_json: string }>(
+      "SELECT execution_context_json FROM trace_events WHERE project_id = ? AND session_id = ?",
+      secondProject.projectId, "shared-run",
+    )!.execution_context_json);
+    expect(context.modelInfo).toBeNull();
+    expect(context.launchMethod).toBeNull();
+    database.close();
+  });
+
   it("records an early mutation violation but never blocks the tool", async () => {
     const { directory, database, service } = await fixture();
     const event = mapClaudeHook({ hook_event_name: "PreToolUse", session_id: "s1", cwd: directory, tool_name: "Write", tool_use_id: "u1", tool_input: { file_path: path.join(directory, "a.ts"), apiKey: "secret" } });
