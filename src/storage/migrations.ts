@@ -775,7 +775,7 @@ export const migrations: Migration[] = [{
       plugin_id TEXT NOT NULL REFERENCES runtime_plugins(id) ON DELETE CASCADE,
       revision TEXT NOT NULL,
       manifest_json TEXT NOT NULL,
-      status TEXT NOT NULL CHECK(status IN ('candidate', 'active', 'replaced', 'failed', 'disposed')),
+      status TEXT NOT NULL CHECK(status IN ('candidate', 'active', 'suspended', 'replaced', 'failed', 'disposed')),
       created_at TEXT NOT NULL,
       UNIQUE(plugin_id, revision)
     );
@@ -818,7 +818,7 @@ export const migrations: Migration[] = [{
       compensation_operation TEXT,
       evidence_refs_json TEXT NOT NULL,
       disposal_status TEXT NOT NULL CHECK(disposal_status IN (
-        'active', 'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
+        'pending', 'active', 'disposed', 'compensated', 'conflict', 'manual_resolution', 'not_disposable'
       )),
       created_at TEXT NOT NULL,
       disposed_at TEXT,

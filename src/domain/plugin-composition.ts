@@ -12,7 +12,7 @@ export type PluginCompositionState =
   | "needs_recovery"
   | "disposed";
 
-export type PluginRevisionStatus = "candidate" | "active" | "replaced" | "failed" | "disposed";
+export type PluginRevisionStatus = "candidate" | "active" | "suspended" | "replaced" | "failed" | "disposed";
 export type PluginRegistrationKind = "skill" | "workflow" | "hook" | "binding" | "runtime_extension";
 export type PluginDisposerKind = "unregister_callback" | "restart_required" | "manual";
 export type PluginRegistrationDisposalAction = "disposed" | "retain";

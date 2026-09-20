@@ -25,6 +25,7 @@ export type HarnessErrorCode =
   | "effect_invalid"
   | "replacement_invalid"
   | "project_clone_invalid"
+  | "plugin_composition_invalid"
   | "database_busy"
   | "storage_failure";
 
