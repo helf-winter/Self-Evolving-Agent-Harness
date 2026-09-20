@@ -193,15 +193,15 @@ export class FailureCaseService {
     contract: FailureReproductionContract;
   }): FailureReproductionRevisionView {
     validateReproductionContract(input.contract);
-    const failureCase = this.requireFailureCase(input.projectId, input.failureCaseId);
-    this.requireEvidence(input.projectId, input.contract.evidenceRefs);
-    const revisionNumber = (this.database.get<{ maximum: number | null }>(
-      "SELECT MAX(revision_number) AS maximum FROM failure_reproduction_revisions WHERE failure_case_id = ? AND project_id = ?",
-      input.failureCaseId, input.projectId,
-    )?.maximum ?? 0) + 1;
-    const reproductionRevisionId = newId();
-    const createdAt = nowIso();
-    this.database.transaction(() => {
+    return this.database.transaction(() => {
+      const failureCase = this.requireFailureCase(input.projectId, input.failureCaseId);
+      this.requireEvidence(input.projectId, input.contract.evidenceRefs);
+      const revisionNumber = (this.database.get<{ maximum: number | null }>(
+        "SELECT MAX(revision_number) AS maximum FROM failure_reproduction_revisions WHERE failure_case_id = ? AND project_id = ?",
+        input.failureCaseId, input.projectId,
+      )?.maximum ?? 0) + 1;
+      const reproductionRevisionId = newId();
+      const createdAt = nowIso();
       this.database.run(`
         INSERT INTO failure_reproduction_revisions (
           id, project_id, failure_case_id, revision_number, reproduction_mode,
@@ -210,15 +210,15 @@ export class FailureCaseService {
       `, reproductionRevisionId, input.projectId, failureCase.id, revisionNumber,
       input.contract.mode, canonicalJson(input.contract), createdAt);
       this.database.run("UPDATE failure_cases SET updated_at = ? WHERE id = ? AND project_id = ?", createdAt, failureCase.id, input.projectId);
+      return {
+        reproductionRevisionId,
+        failureCaseId: failureCase.id,
+        revisionNumber,
+        mode: input.contract.mode,
+        validationStatus: "draft",
+        createdAt,
+      };
     });
-    return {
-      reproductionRevisionId,
-      failureCaseId: failureCase.id,
-      revisionNumber,
-      mode: input.contract.mode,
-      validationStatus: "draft",
-      createdAt,
-    };
   }
 
   validateReproduction(input: {
@@ -231,6 +231,16 @@ export class FailureCaseService {
     if (!input.idempotencyKey.trim()) {
       throw new HarnessError("reproduction_validation_rejected", "reproduction validation requires an idempotency key");
     }
+    return this.database.transaction(() => this.validateReproductionWithinTransaction(input));
+  }
+
+  private validateReproductionWithinTransaction(input: {
+    projectId: string;
+    failureCaseId: string;
+    reproductionRevisionId: string;
+    observation: ReproductionValidationObservation;
+    idempotencyKey: string;
+  }): ReproductionValidationView {
     const failureCase = this.requireFailureCase(input.projectId, input.failureCaseId);
     const revision = this.database.get<{
       id: string; reproduction_mode: FailureReproductionContract["mode"]; contract_json: string; created_at: string;
@@ -284,32 +294,30 @@ export class FailureCaseService {
         : contract.mode === "assisted" ? "verified_assisted" : "verified_automated";
     const validationResultId = newId();
     const createdAt = nowIso();
-    this.database.transaction(() => {
-      this.database.run(`
-        INSERT INTO reproduction_validation_results (
-          id, project_id, failure_case_id, reproduction_revision_id, observation_json,
-          pre_fix_verdict, post_fix_verdict, oracle_discrimination_verdict,
-          repeat_stability_verdict, isolation_verdict, evidence_refs_json,
-          maturity_promotion_verdict, rejection_reasons_json, idempotency_key, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, validationResultId, input.projectId, input.failureCaseId, input.reproductionRevisionId,
-      observationJson, input.observation.preFixVerdict, input.observation.postFixVerdict,
-      input.observation.oracleDiscriminationVerdict, input.observation.repeatStabilityVerdict,
-      input.observation.isolationVerdict, canonicalJson(input.observation.evidenceRefs),
-      promotedMaturity, canonicalJson(accepted ? [] : ["maturity_gates_not_met"]),
-      input.idempotencyKey, createdAt);
-      this.database.run(
-        "UPDATE failure_reproduction_revisions SET validation_status = ? WHERE id = ? AND project_id = ?",
-        validationStatus, input.reproductionRevisionId, input.projectId,
-      );
-      const useRevision = accepted && maturityRank[promotedMaturity] >= maturityRank[failureCase.maturity_level];
-      this.database.run(`
-        UPDATE failure_cases
-        SET maturity_level = ?, current_reproduction_revision_id = CASE WHEN ? = 1 THEN ? ELSE current_reproduction_revision_id END,
-            updated_at = ?
-        WHERE id = ? AND project_id = ?
-      `, caseMaturity, useRevision ? 1 : 0, input.reproductionRevisionId, createdAt, input.failureCaseId, input.projectId);
-    });
+    this.database.run(`
+      INSERT INTO reproduction_validation_results (
+        id, project_id, failure_case_id, reproduction_revision_id, observation_json,
+        pre_fix_verdict, post_fix_verdict, oracle_discrimination_verdict,
+        repeat_stability_verdict, isolation_verdict, evidence_refs_json,
+        maturity_promotion_verdict, rejection_reasons_json, idempotency_key, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, validationResultId, input.projectId, input.failureCaseId, input.reproductionRevisionId,
+    observationJson, input.observation.preFixVerdict, input.observation.postFixVerdict,
+    input.observation.oracleDiscriminationVerdict, input.observation.repeatStabilityVerdict,
+    input.observation.isolationVerdict, canonicalJson(input.observation.evidenceRefs),
+    promotedMaturity, canonicalJson(accepted ? [] : ["maturity_gates_not_met"]),
+    input.idempotencyKey, createdAt);
+    this.database.run(
+      "UPDATE failure_reproduction_revisions SET validation_status = ? WHERE id = ? AND project_id = ?",
+      validationStatus, input.reproductionRevisionId, input.projectId,
+    );
+    const useRevision = accepted && maturityRank[promotedMaturity] >= maturityRank[failureCase.maturity_level];
+    this.database.run(`
+      UPDATE failure_cases
+      SET maturity_level = ?, current_reproduction_revision_id = CASE WHEN ? = 1 THEN ? ELSE current_reproduction_revision_id END,
+          updated_at = ?
+      WHERE id = ? AND project_id = ?
+    `, caseMaturity, useRevision ? 1 : 0, input.reproductionRevisionId, createdAt, input.failureCaseId, input.projectId);
     return {
       validationResultId,
       failureCaseId: input.failureCaseId,
