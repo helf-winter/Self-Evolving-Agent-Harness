@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(8);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(9);
     reopened.close();
   });
 
@@ -236,6 +236,35 @@ describe("RuntimeDatabase", () => {
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ status: string }>("SELECT status FROM task_node_replacement_records WHERE id = 'replacement1'"))
       .toEqual({ status: "pending_confirmation" });
+    reopened.close();
+  });
+
+  it("persists token-backed Project identity, Clone provenance, entity maps, and inherited evidence", async () => {
+    const filename = await databasePath();
+    const database = new RuntimeDatabase(filename);
+    expect(database.all<{ name: string }>(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+        AND name IN ('project_clone_records', 'project_clone_entity_maps', 'project_clone_inherited_evidence')
+      ORDER BY name
+    `)).toEqual([
+      { name: "project_clone_entity_maps" }, { name: "project_clone_inherited_evidence" }, { name: "project_clone_records" },
+    ]);
+    database.run("INSERT INTO projects (id, canonical_path, marker_id, identity_token, display_path, platform, created_at, updated_at) VALUES ('p1', '/work/source', 'p1', 'token-1', '/work/source', 'linux', 'now', 'now')");
+    database.run("INSERT INTO projects (id, canonical_path, marker_id, identity_token, display_path, platform, cloned_from_project_id, cloned_at, created_at, updated_at) VALUES ('p2', '/work/copy', 'p2', 'token-2', '/work/copy', 'linux', 'p1', 'later', 'later', 'later')");
+    database.run("INSERT INTO project_clone_records (id, source_project_id, target_project_id, source_path, target_path, cloned_entity_counts_json, provenance_policy_json, status, created_at) VALUES ('clone1', 'p1', 'p2', '/work/source', '/work/copy', '{}', '{}', 'cloning', 'later')");
+    database.run("INSERT INTO project_clone_entity_maps (clone_id, entity_type, source_entity_id, target_entity_id, created_at) VALUES ('clone1', 'task_tree', 't1', 't2', 'later')");
+    database.run("INSERT INTO project_clone_inherited_evidence (id, clone_id, source_project_id, target_project_id, evidence_kind, source_entity_id, target_entity_id, inheritance_status, metadata_json, created_at) VALUES ('inherit1', 'clone1', 'p1', 'p2', 'evaluation', 'e1', 'n2', 'needs_revalidation', '{}', 'later')");
+    expect(database.get<{ status: string }>("SELECT status FROM project_clone_records WHERE id = 'clone1'"))
+      .toEqual({ status: "cloning" });
+    expect(() => database.run("INSERT INTO projects (id, canonical_path, identity_token, created_at, updated_at) VALUES ('p3', '/work/other', 'token-2', 'now', 'now')")).toThrow();
+    expect(() => database.run("UPDATE project_clone_records SET status = 'unknown' WHERE id = 'clone1'")).toThrow();
+    expect(() => database.run("INSERT INTO project_clone_entity_maps (clone_id, entity_type, source_entity_id, target_entity_id, created_at) VALUES ('clone1', 'task_tree', 't1', 'another', 'later')")).toThrow();
+    database.close();
+
+    const reopened = new RuntimeDatabase(filename);
+    expect(reopened.get<{ cloned_from_project_id: string; identity_token: string }>(
+      "SELECT cloned_from_project_id, identity_token FROM projects WHERE id = 'p2'",
+    )).toEqual({ cloned_from_project_id: "p1", identity_token: "token-2" });
     reopened.close();
   });
 });

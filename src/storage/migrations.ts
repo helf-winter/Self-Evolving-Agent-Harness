@@ -684,4 +684,75 @@ export const migrations: Migration[] = [{
     CREATE INDEX effect_disposal_replacement_idx
       ON effect_disposal_results(replacement_id, created_at);
   `,
+}, {
+  version: 9,
+  sql: `
+    ALTER TABLE projects ADD COLUMN identity_token TEXT;
+    ALTER TABLE projects ADD COLUMN display_path TEXT;
+    ALTER TABLE projects ADD COLUMN display_name TEXT;
+    ALTER TABLE projects ADD COLUMN platform TEXT;
+    ALTER TABLE projects ADD COLUMN cloned_from_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;
+    ALTER TABLE projects ADD COLUMN cloned_at TEXT;
+    CREATE UNIQUE INDEX project_identity_token_unique
+      ON projects(identity_token) WHERE identity_token IS NOT NULL;
+    CREATE INDEX project_clone_source_idx ON projects(cloned_from_project_id, cloned_at);
+
+    ALTER TABLE project_path_aliases ADD COLUMN observed_path TEXT;
+    ALTER TABLE project_path_aliases ADD COLUMN platform TEXT;
+    ALTER TABLE project_path_aliases ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0 CHECK(is_primary IN (0, 1));
+    UPDATE project_path_aliases
+      SET observed_path = normalized_path,
+          is_primary = CASE WHEN normalized_path = (
+            SELECT canonical_path FROM projects WHERE projects.id = project_path_aliases.project_id
+          ) THEN 1 ELSE 0 END;
+    CREATE UNIQUE INDEX one_primary_project_path
+      ON project_path_aliases(project_id) WHERE is_primary = 1;
+
+    ALTER TABLE task_trees ADD COLUMN cloned_from_task_tree_id TEXT;
+    CREATE INDEX task_tree_clone_source_idx ON task_trees(cloned_from_task_tree_id);
+
+    CREATE TABLE project_clone_records (
+      id TEXT PRIMARY KEY,
+      source_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      target_project_id TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+      source_path TEXT NOT NULL,
+      target_path TEXT NOT NULL,
+      cloned_entity_counts_json TEXT NOT NULL,
+      provenance_policy_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'cloning', 'completed', 'incomplete', 'failed', 'recovered')),
+      error_summary TEXT,
+      created_at TEXT NOT NULL,
+      completed_at TEXT
+    );
+    CREATE INDEX project_clone_history_idx
+      ON project_clone_records(source_project_id, created_at DESC);
+
+    CREATE TABLE project_clone_entity_maps (
+      clone_id TEXT NOT NULL REFERENCES project_clone_records(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL,
+      source_entity_id TEXT NOT NULL,
+      target_entity_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(clone_id, entity_type, source_entity_id),
+      UNIQUE(clone_id, entity_type, target_entity_id)
+    );
+    CREATE INDEX project_clone_target_map_idx
+      ON project_clone_entity_maps(clone_id, target_entity_id);
+
+    CREATE TABLE project_clone_inherited_evidence (
+      id TEXT PRIMARY KEY,
+      clone_id TEXT NOT NULL REFERENCES project_clone_records(id) ON DELETE CASCADE,
+      source_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      target_project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      evidence_kind TEXT NOT NULL CHECK(evidence_kind IN ('evaluation', 'completion_evidence', 'confirmation')),
+      source_entity_id TEXT NOT NULL,
+      target_entity_id TEXT,
+      inheritance_status TEXT NOT NULL CHECK(inheritance_status IN ('inherited_from_clone', 'needs_revalidation', 'invalidated')),
+      metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(clone_id, evidence_kind, source_entity_id, target_entity_id)
+    );
+    CREATE INDEX project_clone_evidence_target_idx
+      ON project_clone_inherited_evidence(target_project_id, target_entity_id, created_at DESC);
+  `,
 }];
