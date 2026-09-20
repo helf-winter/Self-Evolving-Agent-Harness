@@ -22,6 +22,7 @@ export interface LifecycleTransitionInput {
   evidenceComplete: boolean;
   dependenciesSucceeded: boolean;
   childrenSucceeded: boolean;
+  blockingDrift?: boolean;
 }
 
 export interface LifecycleTransitionDecision {
@@ -35,6 +36,7 @@ export interface LifecycleTransitionDecision {
     | "dependencies_incomplete"
     | "children_incomplete"
     | "evaluation_uncertain"
+    | "blocking_drift"
     | null;
 }
 
@@ -42,6 +44,9 @@ export function decideLifecycleTransition(input: LifecycleTransitionInput): Life
   const base = { policyVersion: LIFECYCLE_POLICY_VERSION, applied: false } as const;
   if (!input.currentRevision) {
     return { ...base, targetStatus: "needs_revalidation", rejectionCode: "stale_revision" };
+  }
+  if (input.blockingDrift) {
+    return { ...base, targetStatus: "blocked", rejectionCode: "blocking_drift" };
   }
   if (input.fromStatus !== "verifying") {
     return { ...base, targetStatus: input.fromStatus, rejectionCode: "invalid_from_status" };

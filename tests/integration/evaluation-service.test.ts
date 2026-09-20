@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EvaluationService } from "../../src/application/evaluation-service.js";
 import { NodeExecutionService } from "../../src/application/node-execution-service.js";
+import { PlanDriftService } from "../../src/application/plan-drift-service.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
 
 const dirs: string[] = [];
@@ -98,6 +99,35 @@ describe("EvaluationService", () => {
     const attempt = startVerifying(executions);
     addEvidence(database, executions, attempt.attemptId, "current-evidence");
     expect(evaluations.evaluateAttempt({ projectId: "p1", attemptId: attempt.attemptId, proposedVerdict: "succeeded", riskSummary: null }).transition).toMatchObject({ applied: true, targetStatus: "succeeded" });
+    database.close();
+  });
+
+  it("records success as uncertain while a blocking Plan Drift is unresolved", async () => {
+    const { database, executions, evaluations } = await fixture();
+    const attempt = startVerifying(executions);
+    addEvidence(database, executions, attempt.attemptId, "blocked-evidence");
+    new PlanDriftService(database).recordDrift({
+      projectId: "p1",
+      treeId: "t1",
+      nodeId: "n1",
+      driftType: "responsibility_changed",
+      severity: "blocking",
+      description: "The implementation crossed its confirmed responsibility boundary",
+      explanation: "The active Task Node no longer matches the confirmed plan",
+      recommendation: "Refine and reconfirm the affected branch",
+    });
+
+    const result = evaluations.evaluateAttempt({
+      projectId: "p1",
+      attemptId: attempt.attemptId,
+      proposedVerdict: "succeeded",
+      riskSummary: null,
+    });
+
+    expect(result.evaluation.verdict).toBe("uncertain");
+    expect(result.transition).toMatchObject({ applied: false, targetStatus: "blocked", rejectionCode: "blocking_drift" });
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'n1'")).toEqual({ status: "blocked" });
+    expect(database.get<{ status: string }>("SELECT status FROM execution_attempts WHERE id = ?", attempt.attemptId)).toEqual({ status: "blocked" });
     database.close();
   });
 });

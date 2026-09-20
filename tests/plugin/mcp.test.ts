@@ -26,6 +26,8 @@ describe("Harness MCP binding", () => {
       "harness_get_task_tree_summary", "harness_get_trace_events", "harness_list_task_tree_candidates",
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
+      "harness_get_artifact_graph", "harness_get_artifact_detail", "harness_get_plan_drift_summary",
+      "harness_record_plan_drift",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -33,8 +35,27 @@ describe("Harness MCP binding", () => {
     expect(tools.find((tool) => tool.name === "harness_create_confirmation_prompt")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" }, readinessResultId: { type: "string" } },
     });
+    expect(tools.find((tool) => tool.name === "harness_get_plan_drift_summary")?.inputSchema).toMatchObject({
+      properties: { severity: { enum: ["info", "warning", "blocking"] }, resolutionStatus: { enum: expect.any(Array) } },
+    });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
+    const createdContent = (created as { content: Array<{ type: string; text?: string }> }).content;
+    const createdValue = JSON.parse(createdContent[0]?.type === "text" ? createdContent[0].text ?? "null" : "null") as { treeId: string };
+    const recorded = await client.callTool({
+      name: "harness_record_plan_drift",
+      arguments: {
+        cwd: project, treeId: createdValue.treeId, driftType: "relation_changed", severity: "warning",
+        description: "Observed relation changed", explanation: "The implementation differs from the draft",
+      },
+    });
+    expect(recorded.isError).not.toBe(true);
+    const drifts = await client.callTool({ name: "harness_get_plan_drift_summary", arguments: { cwd: project, treeId: createdValue.treeId, severity: "warning" } });
+    const driftContent = (drifts as { content: Array<{ type: string; text?: string }> }).content;
+    const driftValue = JSON.parse(driftContent[0]?.type === "text" ? driftContent[0].text ?? "null" : "null") as { items: unknown[] };
+    expect(driftValue.items).toHaveLength(1);
+    const graph = await client.callTool({ name: "harness_get_artifact_graph", arguments: { cwd: project, treeId: createdValue.treeId } });
+    expect(graph.isError).not.toBe(true);
     const snapshot = await client.callTool({ name: "harness_get_runtime_snapshot", arguments: { cwd: project } });
     const content = (snapshot as { content: Array<{ type: string; text?: string }> }).content;
     const parsed = JSON.parse(content[0]?.type === "text" ? content[0].text ?? "null" : "null") as { workflow: { stage: string } };

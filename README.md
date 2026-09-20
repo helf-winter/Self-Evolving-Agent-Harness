@@ -11,10 +11,13 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - 分支确认记录不可变；节点确认状态与执行状态分离，支持 `draft`、`pending_user_confirmation`、`confirmed`、`partial_confirmed`；
 - 修改一个已确认分支时，仅该分支重新确认，未变化兄弟分支保留确认；跨分支依赖未确认时节点处于 `blocked_by_unconfirmed_dependency`；
 - Claude 生命周期 Hook 的幂等、脱敏 Trace 与 Artifact 投影；
-- Snapshot、Summary、Detail 与分页 Trace 查询；
+- 修订绑定的 Artifact Graph：Task Link、Artifact Relation、Contract、规划基线和 Trace 来源；
+- 确定性 Hook 自动识别未规划 Artifact，语义 Drift 可由 Agent 显式记录；阻断 Drift 会暂停节点等待用户确认；
+- Snapshot、Task Tree、Artifact Graph、Artifact Detail、Plan Drift 与分页 Trace 查询，全部严格按 Project 隔离；
 - 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
+- 未解决的阻断 Drift 会把成功提议记录为 `uncertain`，Evaluation 不能绕过确认门禁；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 15 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 19 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -72,6 +75,19 @@ harness node evaluate ATTEMPT_ID succeeded
 
 `evaluate ... succeeded` 只是提出成功结论。Runtime 会核对当前修订、所需证据、依赖节点与子节点状态；条件不完整时会把 Evaluation 记录为 `uncertain`，不会把节点标成成功。
 
+### Artifact Graph 与 Plan Drift
+
+Artifact Graph 保存当前工程状态，Trace 保存追加式事实历史。文件或验证命令 Hook 会同步更新 Artifact 的状态与来源 Trace；规划修订则保存节点与 Artifact 的链接、Artifact 间关系和契约。两者不会重复承担事实历史与当前状态的职责。
+
+Agent 可按需使用以下 Runtime Tools：
+
+- `harness_get_artifact_graph`：分页查看当前 Artifact、节点链接、关系和契约；
+- `harness_get_artifact_detail`：查看单个 Artifact 的当前状态、来源 Trace、关联任务和 Drift；
+- `harness_get_plan_drift_summary`：按 Task Tree、Task Node、严重级别和处理状态筛选 Drift；
+- `harness_record_plan_drift`：记录不能由 Hook 确定判断的语义偏移。
+
+`warning` Drift 作为事实记录继续执行；`blocking` Drift 会把相关节点和活动 Attempt 置为 `blocked`，直到后续用户确认流程解决该偏移。所有查询都只返回当前目录所绑定 Project 的数据。
+
 ### 分支确认链路
 
 Agent 通过 Runtime Tools 执行下列链路：
@@ -108,4 +124,4 @@ npm run check
 claude plugin validate ./plugin
 ```
 
-完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Evolution、失败案例自动晋升、Task Node Replacement/Drift、项目克隆、Codex Binding 和图形界面。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Evolution、失败案例自动晋升、完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。

@@ -51,4 +51,16 @@ describe("Task Node lifecycle policy", () => {
     expect(decideLifecycleTransition({ ...common, verdict: "failed" })).toMatchObject({ applied: true, targetStatus: "failed" });
     expect(decideLifecycleTransition({ ...common, verdict: "blocked" })).toMatchObject({ applied: true, targetStatus: "blocked" });
   });
+
+  it("keeps a node blocked while a blocking Plan Drift awaits confirmation", () => {
+    expect(decideLifecycleTransition({
+      currentRevision: true,
+      fromStatus: "blocked",
+      verdict: "uncertain",
+      evidenceComplete: true,
+      dependenciesSucceeded: true,
+      childrenSucceeded: true,
+      blockingDrift: true,
+    })).toMatchObject({ applied: false, targetStatus: "blocked", rejectionCode: "blocking_drift" });
+  });
 });

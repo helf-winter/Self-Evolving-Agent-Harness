@@ -63,6 +63,16 @@ describe("Node execution and evaluation vertical slice", () => {
     first.executions.attachEvidence({ projectId: project.projectId, attemptId: success.attemptId, requiredEvidenceKey: "test", traceEventId: test.eventId });
     first.executions.beginVerification({ projectId: project.projectId, attemptId: success.attemptId, expectedStatus: "running" });
     first.evaluations.evaluateAttempt({ projectId: project.projectId, attemptId: success.attemptId, proposedVerdict: "succeeded", riskSummary: null });
+    first.drifts.recordDrift({
+      projectId: project.projectId,
+      treeId: root.treeId,
+      nodeId: "implementation",
+      actualArtifactId: "route-file",
+      driftType: "relation_changed",
+      severity: "warning",
+      description: "The implementation refined the route relation",
+      explanation: "The observed engineering relation is richer than the initial plan",
+    });
     first.close();
 
     const reopened = openRuntime(environment);
@@ -72,6 +82,13 @@ describe("Node execution and evaluation vertical slice", () => {
     expect(detail.evaluations.map((evaluation) => evaluation.verdict)).toEqual(["succeeded", "failed", "failed"]);
     expect(detail.evaluations[0]).toMatchObject({ coveredRequiredEvidence: ["test"], evidenceRefs: [test.eventId] });
     expect(reopened.queries.getTaskTreeSummary(project.projectId, root.treeId)).toMatchObject({ attemptCount: 4, evaluationCount: 4 });
+    expect(reopened.queries.getArtifactGraphSummary(project.projectId, { treeId: root.treeId }).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ artifactId: "route-file", locator: "src/route.ts" }),
+    ]));
+    expect(reopened.queries.getArtifactDetail(project.projectId, "route-file").drifts).toEqual([
+      expect.objectContaining({ severity: "warning", resolutionStatus: "recorded" }),
+    ]);
+    expect(reopened.queries.getPlanDriftSummary(project.projectId, { treeId: root.treeId, severity: "warning" }).items).toHaveLength(1);
     reopened.close();
   });
 });

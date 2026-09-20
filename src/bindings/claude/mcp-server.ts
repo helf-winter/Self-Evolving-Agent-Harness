@@ -114,6 +114,64 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
   })));
 
+  server.registerTool("harness_get_artifact_graph", {
+    description: "Get the current project-scoped Artifact Graph with task links, relations, contracts, and pagination.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, limit, cursor }) => guarded(async () => runtime.queries.getArtifactGraphSummary(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_artifact_detail", {
+    description: "Get one Artifact's current state, provenance, Task links, relations, contracts, Trace IDs, and Drift records.",
+    inputSchema: { cwd: cwdSchema, artifactId: z.string().min(1) },
+  }, ({ cwd, artifactId }) => guarded(async () => runtime.queries.getArtifactDetail(
+    (await existingProject(cwd)).projectId, artifactId,
+  )));
+
+  server.registerTool("harness_get_plan_drift_summary", {
+    description: "Get project-scoped Plan Drift records with optional scope, severity, resolution, and pagination filters.",
+    inputSchema: {
+      cwd: cwdSchema,
+      treeId: z.string().optional(),
+      nodeId: z.string().optional(),
+      severity: z.enum(["info", "warning", "blocking"]).optional(),
+      resolutionStatus: z.enum(["pending_user_confirmation", "accepted", "rejected", "branch_cancelled", "recorded"]).optional(),
+      limit: z.number().int().min(1).max(200).optional(),
+      cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, severity, resolutionStatus, limit, cursor }) => guarded(async () => runtime.queries.getPlanDriftSummary(
+    (await existingProject(cwd)).projectId,
+    {
+      ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(severity ? { severity } : {}),
+      ...(resolutionStatus ? { resolutionStatus } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
+    },
+  )));
+
+  server.registerTool("harness_record_plan_drift", {
+    description: "Record an explicit semantic Plan Drift fact; blocking Drift pauses the affected Task Node pending user confirmation.",
+    inputSchema: {
+      cwd: cwdSchema,
+      treeId: z.string().min(1),
+      nodeId: z.string().optional(),
+      plannedArtifactId: z.string().optional(),
+      actualArtifactId: z.string().optional(),
+      driftType: z.enum(["missing_planned_artifact", "unexpected_artifact", "artifact_replaced", "responsibility_changed", "relation_changed"]),
+      severity: z.enum(["info", "warning", "blocking"]),
+      description: z.string().min(1),
+      explanation: z.string().min(1),
+      recommendation: z.string().optional(),
+      sourceTraceEventId: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, plannedArtifactId, actualArtifactId, driftType, severity, description, explanation, recommendation, sourceTraceEventId }) => guarded(async () => runtime.drifts.recordDrift({
+    projectId: (await existingProject(cwd)).projectId, treeId, driftType, severity, description, explanation,
+    ...(nodeId ? { nodeId } : {}), ...(plannedArtifactId ? { plannedArtifactId } : {}),
+    ...(actualArtifactId ? { actualArtifactId } : {}), ...(recommendation ? { recommendation } : {}),
+    ...(sourceTraceEventId ? { sourceTraceEventId } : {}),
+  })));
+
   server.registerTool("harness_start_node_attempt", {
     description: "Start an evidence-backed Execution Attempt for the current Task Node revision.",
     inputSchema: { cwd: cwdSchema, nodeId: z.string().min(1), expectedTreeRevisionId: z.string().min(1) },

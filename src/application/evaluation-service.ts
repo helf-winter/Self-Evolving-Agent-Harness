@@ -54,7 +54,8 @@ export class EvaluationService {
     riskSummary: string | null;
   }): { evaluation: EvaluationResultView; transition: AppliedLifecycleTransition } {
     const attempt = this.requireAttempt(input.projectId, input.attemptId);
-    if (attempt.status !== "verifying") {
+    const blockingDrift = this.hasUnresolvedBlockingDrift(attempt.project_id, attempt.tree_id, attempt.task_node_id);
+    if (attempt.status !== "verifying" && !(attempt.status === "blocked" && blockingDrift)) {
       throw new HarnessError("evaluation_not_applicable", "only a verifying Execution Attempt can be evaluated");
     }
 
@@ -70,7 +71,9 @@ export class EvaluationService {
     const dependenciesSucceeded = this.dependenciesSucceeded(attempt.tree_id, body.dependencies ?? []);
     const childrenSucceeded = this.childrenSucceeded(attempt.tree_id, attempt.task_node_id);
     const successConditionsMet = missing.length === 0 && dependenciesSucceeded && childrenSucceeded;
-    const verdict: EvaluationVerdict = input.proposedVerdict === "succeeded" && !successConditionsMet ? "uncertain" : input.proposedVerdict;
+    const verdict: EvaluationVerdict = input.proposedVerdict === "succeeded" && (!successConditionsMet || blockingDrift)
+      ? "uncertain"
+      : input.proposedVerdict;
     const currentRevision = attempt.revision_tree_id === attempt.current_revision_id;
     const decision = decideLifecycleTransition({
       currentRevision,
@@ -79,6 +82,7 @@ export class EvaluationService {
       evidenceComplete: missing.length === 0,
       dependenciesSucceeded,
       childrenSucceeded,
+      blockingDrift,
     });
 
     const evaluationId = newId();
@@ -169,5 +173,15 @@ export class EvaluationService {
        WHERE n.tree_id = ? AND n.parent_id = ?`,
       treeId, nodeId,
     ).every((child) => child.status === "succeeded");
+  }
+
+  private hasUnresolvedBlockingDrift(projectId: string, treeId: string, nodeId: string): boolean {
+    return Boolean(this.database.get(`
+      SELECT id FROM plan_drift_records
+      WHERE project_id = ? AND tree_id = ? AND severity = 'blocking'
+        AND resolution_status = 'pending_user_confirmation'
+        AND (task_node_id = ? OR task_node_id IS NULL)
+      LIMIT 1
+    `, projectId, treeId, nodeId));
   }
 }

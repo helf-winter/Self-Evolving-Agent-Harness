@@ -1,6 +1,7 @@
 import { HarnessError } from "../domain/errors.js";
 import type { TaskNodeInput, TaskTreeDocument } from "../domain/task-tree.js";
 import type { RuntimeDatabase } from "../storage/database.js";
+import type { PlanDriftResolutionStatus, PlanDriftSeverity } from "./plan-drift-service.js";
 
 interface TraceRow {
   id: string;
@@ -10,6 +11,45 @@ interface TraceRow {
   event_name: string;
   payload_json: string;
   occurred_at: string;
+}
+
+interface ArtifactRow {
+  id: string;
+  tree_id: string | null;
+  kind: string;
+  locator: string;
+  status: string;
+  metadata_json: string;
+  granularity: string;
+  artifact_type: string;
+  path_or_name: string | null;
+  parent_artifact_id: string | null;
+  identity_strategy: string;
+  confidence: string;
+  planned_by_task_node_id: string | null;
+  plan_baseline_at: string | null;
+  current_hash_or_version: string | null;
+  source_trace_event_id: string | null;
+  source_planning_revision_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DriftRow {
+  id: string;
+  tree_id: string;
+  task_node_id: string | null;
+  planned_artifact_id: string | null;
+  actual_artifact_id: string | null;
+  drift_type: string;
+  severity: string;
+  trace_event_id: string;
+  drift_explanation: string;
+  agent_recommendation: string | null;
+  resolution_status: string;
+  user_decision: string | null;
+  description: string;
+  created_at: string;
 }
 
 function decodeCursor(cursor?: string): number {
@@ -45,6 +85,7 @@ export class RuntimeQueryService {
       projectId,
     )?.count ?? 0;
     const confirmationCounts = this.getConfirmationCounts(projectId, state?.selected_tree_id ?? workflow?.tree_id ?? null);
+    const driftCounts = this.getDriftCounts(projectId, state?.selected_tree_id ?? workflow?.tree_id ?? null);
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
@@ -54,6 +95,7 @@ export class RuntimeQueryService {
       blockerCount: readiness ? (JSON.parse(readiness.blockers_json) as unknown[]).length : 0,
       activeAttemptCount,
       confirmationCounts,
+      driftCounts,
       availableActions: this.availableActions(workflow?.stage),
     };
   }
@@ -76,6 +118,7 @@ export class RuntimeQueryService {
       WHERE tree_revision_id = ?
     `, tree.current_revision_id);
     const confirmationByNode = new Map(confirmationRows.map((row) => [row.task_node_id, row.state]));
+    const artifactCounts = { total: artifacts.length };
     return {
       treeId: tree.id, title: tree.title, status: tree.status, revision: revision.revision,
       nodes: document.nodes.map((node) => ({
@@ -87,6 +130,8 @@ export class RuntimeQueryService {
       traceCount: count,
       attemptCount,
       evaluationCount,
+      artifactCounts,
+      driftCounts: this.getDriftCounts(projectId, treeId),
       confirmationCounts: this.getConfirmationCounts(projectId, treeId),
     };
   }
@@ -184,8 +229,218 @@ export class RuntimeQueryService {
     return { items, nextCursor: hasMore ? encodeCursor(offset + limit) : null };
   }
 
+  getArtifactGraphSummary(projectId: string, query: { limit?: number; cursor?: string; treeId?: string }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
+    const rows = this.database.all<ArtifactRow>(`
+      SELECT id, tree_id, kind, locator, status, metadata_json, granularity, artifact_type, path_or_name,
+             parent_artifact_id, identity_strategy, confidence, planned_by_task_node_id, plan_baseline_at,
+             current_hash_or_version, source_trace_event_id, source_planning_revision_id, created_at, updated_at
+      FROM artifacts WHERE ${filters.join(" AND ")}
+      ORDER BY locator, id LIMIT ? OFFSET ?
+    `, ...params, limit + 1, offset);
+    const selected = rows.slice(0, limit);
+    const associations = this.getArtifactAssociations(projectId, selected.map((row) => row.id));
+    return {
+      projectId,
+      treeId: query.treeId ?? null,
+      items: selected.map((row) => this.mapArtifact(row)),
+      ...associations,
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getArtifactDetail(projectId: string, artifactId: string) {
+    this.requireProject(projectId);
+    const row = this.database.get<ArtifactRow>(`
+      SELECT id, tree_id, kind, locator, status, metadata_json, granularity, artifact_type, path_or_name,
+             parent_artifact_id, identity_strategy, confidence, planned_by_task_node_id, plan_baseline_at,
+             current_hash_or_version, source_trace_event_id, source_planning_revision_id, created_at, updated_at
+      FROM artifacts WHERE id = ? AND project_id = ?
+    `, artifactId, projectId);
+    if (!row) throw new HarnessError("not_found", "Artifact was not found in the current project");
+    const associations = this.getArtifactAssociations(projectId, [artifactId]);
+    const driftRows = this.database.all<DriftRow>(`
+      SELECT id, tree_id, task_node_id, planned_artifact_id, actual_artifact_id, drift_type, severity,
+             trace_event_id, drift_explanation, agent_recommendation, resolution_status, user_decision,
+             description, created_at
+      FROM plan_drift_records
+      WHERE project_id = ? AND (planned_artifact_id = ? OR actual_artifact_id = ?)
+      ORDER BY created_at DESC, id DESC
+    `, projectId, artifactId, artifactId);
+    const drifts = driftRows.map((drift) => this.mapDrift(drift));
+    const traceEventIds = [...new Set([
+      row.source_trace_event_id,
+      ...associations.relations.map((relation) => relation.sourceTraceEventId),
+      ...drifts.map((drift) => drift.traceEventId),
+    ].filter((value): value is string => Boolean(value)))];
+    return { artifact: this.mapArtifact(row), ...associations, drifts, traceEventIds };
+  }
+
+  getPlanDriftSummary(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    severity?: PlanDriftSeverity;
+    resolutionStatus?: PlanDriftResolutionStatus;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("task_node_id = ?"); params.push(query.nodeId); }
+    if (query.severity) { filters.push("severity = ?"); params.push(query.severity); }
+    if (query.resolutionStatus) { filters.push("resolution_status = ?"); params.push(query.resolutionStatus); }
+    const rows = this.database.all<DriftRow>(`
+      SELECT id, tree_id, task_node_id, planned_artifact_id, actual_artifact_id, drift_type, severity,
+             trace_event_id, drift_explanation, agent_recommendation, resolution_status, user_decision,
+             description, created_at
+      FROM plan_drift_records WHERE ${filters.join(" AND ")}
+      ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+    `, ...params, limit + 1, offset);
+    return {
+      items: rows.slice(0, limit).map((row) => this.mapDrift(row)),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
   private requireProject(projectId: string): void {
     if (!this.database.get("SELECT id FROM projects WHERE id = ?", projectId)) throw new HarnessError("not_found", "project was not found");
+  }
+
+  private requireTree(projectId: string, treeId: string): void {
+    if (!this.database.get("SELECT id FROM task_trees WHERE id = ? AND project_id = ?", treeId, projectId)) {
+      throw new HarnessError("not_found", "Task Tree was not found in the current project");
+    }
+  }
+
+  private mapArtifact(row: ArtifactRow) {
+    return {
+      artifactId: row.id,
+      treeId: row.tree_id,
+      kind: row.kind,
+      locator: row.locator,
+      status: row.status,
+      metadata: JSON.parse(row.metadata_json) as unknown,
+      granularity: row.granularity,
+      artifactType: row.artifact_type,
+      pathOrName: row.path_or_name,
+      parentArtifactId: row.parent_artifact_id,
+      identityStrategy: row.identity_strategy,
+      confidence: row.confidence,
+      plannedByTaskNodeId: row.planned_by_task_node_id,
+      planBaselineAt: row.plan_baseline_at,
+      currentHashOrVersion: row.current_hash_or_version,
+      sourceTraceEventId: row.source_trace_event_id,
+      sourcePlanningRevisionId: row.source_planning_revision_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private mapDrift(row: DriftRow) {
+    return {
+      driftId: row.id,
+      treeId: row.tree_id,
+      nodeId: row.task_node_id,
+      plannedArtifactId: row.planned_artifact_id,
+      actualArtifactId: row.actual_artifact_id,
+      driftType: row.drift_type,
+      severity: row.severity,
+      traceEventId: row.trace_event_id,
+      explanation: row.drift_explanation,
+      recommendation: row.agent_recommendation,
+      resolutionStatus: row.resolution_status,
+      userDecision: row.user_decision,
+      description: row.description,
+      createdAt: row.created_at,
+    };
+  }
+
+  private getArtifactAssociations(projectId: string, artifactIds: string[]) {
+    if (artifactIds.length === 0) return { taskLinks: [], relations: [], contracts: [] };
+    const placeholders = artifactIds.map(() => "?").join(", ");
+    const taskLinks = this.database.all<{
+      id: string; tree_id: string; tree_revision_id: string; task_node_id: string;
+      task_node_revision_id: string; artifact_id: string; relation_type: string; source_planning_revision_id: string;
+    }>(`
+      SELECT l.id, l.tree_id, l.tree_revision_id, l.task_node_id, l.task_node_revision_id,
+             l.artifact_id, l.relation_type, l.source_planning_revision_id
+      FROM task_node_artifact_links l
+      JOIN task_trees t ON t.id = l.tree_id AND t.current_revision_id = l.tree_revision_id
+      WHERE l.project_id = ? AND l.artifact_id IN (${placeholders})
+      ORDER BY l.task_node_id, l.artifact_id, l.relation_type
+    `, projectId, ...artifactIds).map((row) => ({
+      linkId: row.id, treeId: row.tree_id, treeRevisionId: row.tree_revision_id, nodeId: row.task_node_id,
+      nodeRevisionId: row.task_node_revision_id, artifactId: row.artifact_id, relationType: row.relation_type,
+      sourcePlanningRevisionId: row.source_planning_revision_id,
+    }));
+    const relationRows = this.database.all<{
+      id: string; tree_id: string | null; tree_revision_id: string | null; from_artifact_id: string;
+      to_artifact_id: string; kind: string; source_trace_event_id: string | null; source_planning_revision_id: string | null;
+    }>(`
+      SELECT r.id, r.tree_id, r.tree_revision_id, r.from_artifact_id, r.to_artifact_id, r.kind,
+             r.source_trace_event_id, r.source_planning_revision_id
+      FROM artifact_graph_relations r
+      WHERE r.project_id = ? AND (r.from_artifact_id IN (${placeholders}) OR r.to_artifact_id IN (${placeholders}))
+        AND (r.tree_revision_id IS NULL OR r.tree_revision_id IN (
+          SELECT current_revision_id FROM task_trees WHERE project_id = ?
+        ))
+      ORDER BY r.from_artifact_id, r.to_artifact_id, r.kind
+    `, projectId, ...artifactIds, ...artifactIds, projectId);
+    const relations = relationRows.map((row) => ({
+      relationId: row.id, treeId: row.tree_id, treeRevisionId: row.tree_revision_id,
+      fromArtifactId: row.from_artifact_id, toArtifactId: row.to_artifact_id, kind: row.kind,
+      sourceTraceEventId: row.source_trace_event_id, sourcePlanningRevisionId: row.source_planning_revision_id,
+    }));
+    const contracts = this.database.all<{
+      contract_id: string; tree_id: string; tree_revision_id: string; artifact_id: string; contract_name: string;
+      contract_version: string; compatibility_policy: string; schema_or_signature: string;
+      provider_revision_ids_json: string; consumer_revision_ids_json: string; validation_refs_json: string;
+    }>(`
+      SELECT c.contract_id, c.tree_id, c.tree_revision_id, c.artifact_id, c.contract_name,
+             c.contract_version, c.compatibility_policy, c.schema_or_signature,
+             c.provider_revision_ids_json, c.consumer_revision_ids_json, c.validation_refs_json
+      FROM artifact_contracts c
+      JOIN task_trees t ON t.id = c.tree_id AND t.current_revision_id = c.tree_revision_id
+      WHERE c.project_id = ? AND c.artifact_id IN (${placeholders})
+      ORDER BY c.contract_name, c.contract_id
+    `, projectId, ...artifactIds).map((row) => ({
+      contractId: row.contract_id, treeId: row.tree_id, treeRevisionId: row.tree_revision_id,
+      artifactId: row.artifact_id, name: row.contract_name, version: row.contract_version,
+      compatibilityPolicy: row.compatibility_policy, schemaOrSignature: row.schema_or_signature,
+      providerNodeRevisionIds: JSON.parse(row.provider_revision_ids_json) as string[],
+      consumerNodeRevisionIds: JSON.parse(row.consumer_revision_ids_json) as string[],
+      validationRefs: JSON.parse(row.validation_refs_json) as string[],
+    }));
+    return { taskLinks, relations, contracts };
+  }
+
+  private getDriftCounts(projectId: string, treeId: string | null) {
+    const filters = ["project_id = ?", "severity IN ('warning', 'blocking')"];
+    const params: string[] = [projectId];
+    if (treeId) { filters.push("tree_id = ?"); params.push(treeId); }
+    const rows = this.database.all<{ severity: string; count: number }>(`
+      SELECT severity, count(*) AS count FROM plan_drift_records
+      WHERE ${filters.join(" AND ")}
+        AND (severity = 'warning' OR resolution_status = 'pending_user_confirmation')
+      GROUP BY severity
+    `, ...params);
+    const counts = { warning: 0, blocking: 0 };
+    for (const row of rows) {
+      if (row.severity === "warning") counts.warning = row.count;
+      else if (row.severity === "blocking") counts.blocking = row.count;
+    }
+    return counts;
   }
 
   private getConfirmationCounts(projectId: string, treeId: string | null) {
