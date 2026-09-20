@@ -150,6 +150,8 @@ describe("EvolutionService Experience and candidate lifecycle", () => {
       oracle: { kind: "predicate" }, reproductionCommand: "npm test -- holdout", timeoutMs: 30_000,
       generatedBy: "independent-agent", leakagePolicy: "no candidate instruction access",
     });
+    database.run("UPDATE skill_test_cases SET created_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", testCase.testCaseId);
+    addTrace(database, "pre-quality", "p1", "2001-01-01T00:00:00.000Z");
     addTrace(database, "early", "p1", "2000-01-01T00:00:00.000Z");
     addTrace(database, "foreign", "p2");
     expect(() => service.validateSkillTestQuality({
@@ -169,6 +171,11 @@ describe("EvolutionService Experience and candidate lifecycle", () => {
       schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
       discriminative: true, stable: true, splitValid: true, evidenceRefs: ["quality-ok"],
     });
+    expect(() => service.recordSkillValidationRun({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
+      runMode: "skill_enabled", repetitionIndex: 1, verdict: "passed", tokenUsage: 20, toolCallCount: 2,
+      sideEffectRisk: "none", sideEffectSummary: "stale evidence", evidenceRefs: ["pre-quality"],
+    })).toThrow(expect.objectContaining({ code: "evidence_scope_mismatch" }));
     const run = service.recordSkillValidationRun({
       projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, skillTestCaseId: testCase.testCaseId,
       runMode: "skill_enabled", repetitionIndex: 1, verdict: "passed", tokenUsage: 20, toolCallCount: 2,

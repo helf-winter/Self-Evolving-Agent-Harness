@@ -106,15 +106,28 @@ harness node evaluate ATTEMPT_ID succeeded --json
 
 额外验证：缺少 setup/cleanup/Oracle/evidence 的契约被拒绝；跨 Project、早于 revision 的验证证据被拒绝；重复 idempotency key 不产生第二条结果；后续低成熟度验证不能让 L4 降级；`flaky` 等可用性状态不会改变成熟度。
 
-## 8. 安全检查
+## 8. Experience 与 Skill 自动晋升
+
+在同一个已确认 Task Node revision 上依次完成两次失败 Attempt 和一次成功 Attempt：
+
+1. 每次运行都通过正常工具产生 Trace，附加 required evidence 并提交 Evaluation；确认只有第三次应用成功后，`harness_get_skill_evolution_candidates` 才出现一个 Experience，且引用两次失败和一次成功。
+2. 使用 `harness_freeze_skill_candidate` 创建候选；重复相同输入应返回同一 revision，修改指令应产生新的不可变 revision。
+3. 分别用 `harness_propose_skill_test_case` 创建 real-failure replay、variation、holdout、negative-applicability；确认测试初始为 draft，且 holdout API 不接收 candidate instruction。
+4. 实际执行测试质量检查并让 Hooks 记录 Trace，再调用 `harness_validate_skill_test_quality`；缺少 schema、隔离、failure reproduction、Oracle、区分度、稳定性或 split 校验时不得 accepted。
+5. 对四种 accepted case 分别记录三次 no-Skill baseline 和三次 Skill-enabled run；Replay baseline 稳定失败，所有 Skill-enabled 与 negative-applicability 运行稳定通过，且记录 token、tool call 与 side-effect risk。
+6. 调用 `harness_generate_skill_validation_report`；确认报告覆盖四类测试、24 个运行证据并自动将 candidate 与 Skill 晋升为 `promoted`。
+7. 退出并重启 Claude，调用 `harness_get_skill_candidate_detail`；确认 Experience、冻结指令、测试定义、质量结果、24 次运行、报告和晋升状态完整恢复。
+
+额外验证：一次失败后成功不产生 Experience；跨 Project Experience、candidate、test 或 Trace 被拒绝；早于 test 创建的证据被拒绝；同一 repetition 不可被不同结果覆盖；缺少任一分片、任一模式少于三次、结果不稳定、Replay baseline 不具区分度、Negative 失败或出现 high/irreversible 副作用时报告必须 fail，不能晋升。
+
+## 9. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到无关目录；解析结果应为 `identity_conflict`，不得共享可写状态。
 
-## 9. 当前不作为验收失败的范围
+## 10. 当前不作为验收失败的范围
 
-- Experience / Skill Candidate 的完整 Evolution 与自动晋升；
 - Task Node Replacement 与 Effect Disposal；
 - 项目 Clone/迁移自动改写；
 - 完整 AST/符号调用图；

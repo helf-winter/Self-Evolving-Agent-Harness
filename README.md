@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change，以及 Failure Case Maturity 六个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity，以及 Experience & Skill Evolution 七个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - 项目路径隔离和 `.agent-harness-project.json` 身份 marker；
@@ -21,8 +21,11 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Scope Change 确认后产生新的 Task Tree 草稿修订并回到精炼阶段，不会直接授权代码执行；
 - 应用后的失败 Evaluation 自动沉淀为 L0 Failure Case；相同结构化签名复用案例，但每次失败 occurrence 独立保留；
 - 结构化复现以不可变 revision 演进，并由独立 Trace 证据确定性推进 L1 manual、L2 assisted、L3 automated 与 L4 regression；
+- 同一 Task Node revision 在两次及以上应用失败后成功时自动产生 Experience；Skill Candidate 指令以不可变 revision 冻结；
+- Replay、Variation、Holdout 与 Negative Applicability 测试先经过独立质量门禁，再分别记录 no-Skill baseline 与 Skill-enabled 重复运行；
+- Validation Report 由代码聚合覆盖率、基线区分度、稳定性、负面适用性与副作用风险，全部硬门禁通过后自动晋升 Skill；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 29 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 36 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -119,6 +122,22 @@ Agent 通过以下工具推进复现成熟度：
 
 复现工具只保存声明的 `entryCommand`，不会自行执行任意 shell。生成复现步骤与验证结果必须分离：L3 需要稳定 pre-fix RED、可区分 Oracle、重复稳定和充分隔离；L4 还必须证明 post-fix GREEN。隔离可以使用 fixture、worktree、临时目录或项目原生测试环境，容器不是强制条件。
 
+### Experience 与 Skill Evolution
+
+当同一个 Task Node revision 的应用后 Evaluation 历史形成 `failed → failed → succeeded` 时，Runtime 自动保存一个 Experience，并保留来源 Project、Tree、Node、Attempt、Evaluation 和 Artifact 引用。一次成功最多生成一个 Experience；失败事实、成功事实和候选指令都不会被后续晋升改写。
+
+Agent 通过以下工具完成可审计的进化闭环：
+
+- `harness_get_skill_evolution_candidates`：按当前 Project、Tree 或 Node 查找合格 Experience；
+- `harness_freeze_skill_candidate`：从 Experience 冻结不可变候选指令；
+- `harness_propose_skill_test_case`：分别提出 real-failure replay、variation、holdout 和 negative-applicability 测试；
+- `harness_validate_skill_test_quality`：用候选测试产生后的同 Project Trace 验证结构、隔离、复现、Oracle、区分度、稳定性和分片正确性；
+- `harness_record_skill_validation_run`：为每个已接受测试保存 no-Skill baseline 与 Skill-enabled 重复运行、资源用量和副作用；
+- `harness_generate_skill_validation_report`：聚合硬门禁并在全部通过时自动晋升；
+- `harness_get_skill_candidate_detail`：查看来源 Experience、测试、质量结果、运行和报告。
+
+每种必需分片的 baseline 与 Skill-enabled 模式都至少执行三次。Replay baseline 必须稳定失败而 Skill-enabled 稳定通过；Holdout 不接收候选指令快照并声明防泄漏策略；Negative Applicability 必须证明 Skill 不会在不适用场景中造成错误行为；任何 high 或 irreversible 副作用都会阻止晋升。
+
 ### 分支确认链路
 
 Agent 通过 Runtime Tools 执行下列链路：
@@ -155,4 +174,4 @@ npm run check
 claude plugin validate ./plugin
 ```
 
-完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含 Experience / Skill Candidate 的完整 Evolution 与自动晋升、完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。
+完整人工验收见 [docs/acceptance.md](docs/acceptance.md)。当前切片尚不包含完整 Task Node Replacement、项目克隆、Codex Binding 和图形界面。

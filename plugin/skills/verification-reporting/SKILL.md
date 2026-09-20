@@ -29,3 +29,9 @@ Maturity means:
 - L4: L3 plus stable post-fix GREEN from a declared fixed baseline.
 
 Use fixture, worktree, temporary directory, or the project's native test environment when sufficient. A container is optional, not a universal requirement. Never put secret values in the environment manifest; record names or `[REDACTED]` only.
+
+After a Task Node revision has at least two applied failures followed by an applied success, query `harness_get_skill_evolution_candidates`. The Runtime creates the Experience from immutable Evaluation history; do not manufacture an Experience from prose or from a single successful run. Use `harness_freeze_skill_candidate` to preserve a reusable instruction as a new immutable candidate revision.
+
+Skill generation and Skill validation are separate responsibilities. Propose replay, variation, holdout, and negative-applicability definitions with `harness_propose_skill_test_case`. A holdout author must not receive the candidate instruction snapshot and must state its leakage policy. Execute each definition through normal tools so Hooks record actual Trace evidence, then submit the quality observations through `harness_validate_skill_test_quality`.
+
+Only accepted tests may produce `harness_record_skill_validation_run` facts. Record three no-Skill baseline and three Skill-enabled repetitions for every required split, including tokens, tool calls, side-effect risk, and Trace IDs. Finish with `harness_generate_skill_validation_report`; Runtime code, not Agent judgment, decides promotion from split coverage, replay discrimination, stability, enabled outcomes, negative applicability, and risk. Use `harness_get_skill_candidate_detail` to report the persisted decision after restart.

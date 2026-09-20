@@ -377,19 +377,24 @@ export class EvolutionService {
     evidenceRefs: string[];
   }): SkillValidationRunView {
     this.requireCandidateProject(input.candidateRevisionId, input.projectId);
-    const testCase = this.database.get<{ skill_candidate_revision_id: string; quality_status: string; created_at: string }>(
-      "SELECT skill_candidate_revision_id, quality_status, created_at FROM skill_test_cases WHERE id = ?", input.skillTestCaseId,
-    );
+    const testCase = this.database.get<{
+      skill_candidate_revision_id: string; quality_status: string; created_at: string; accepted_at: string | null;
+    }>(`SELECT c.skill_candidate_revision_id, c.quality_status, c.created_at,
+               (SELECT MAX(q.created_at) FROM skill_test_quality_results q
+                WHERE q.skill_test_case_id = c.id AND q.verdict = 'accepted') AS accepted_at
+         FROM skill_test_cases c WHERE c.id = ?`, input.skillTestCaseId);
     if (!testCase || testCase.skill_candidate_revision_id !== input.candidateRevisionId) {
       throw new HarnessError("not_found", "Skill test case was not found for this candidate");
     }
-    if (testCase.quality_status !== "accepted") throw new HarnessError("skill_test_invalid", "validation runs require an accepted test case");
+    if (testCase.quality_status !== "accepted" || !testCase.accepted_at) {
+      throw new HarnessError("skill_test_invalid", "validation runs require an accepted test case");
+    }
     if (!Number.isInteger(input.repetitionIndex) || input.repetitionIndex <= 0
       || (input.tokenUsage != null && (!Number.isInteger(input.tokenUsage) || input.tokenUsage < 0))
       || (input.toolCallCount != null && (!Number.isInteger(input.toolCallCount) || input.toolCallCount < 0))) {
       throw new HarnessError("skill_validation_rejected", "validation run counters must be non-negative integers");
     }
-    this.requireEvidence(input.projectId, input.evidenceRefs, testCase.created_at);
+    this.requireEvidence(input.projectId, input.evidenceRefs, testCase.accepted_at);
     const sideEffectSummary = input.sideEffectSummary.trim();
     if (!sideEffectSummary) throw new HarnessError("skill_validation_rejected", "validation run requires a side-effect summary");
     const evidenceRefsJson = canonicalJson(input.evidenceRefs);
