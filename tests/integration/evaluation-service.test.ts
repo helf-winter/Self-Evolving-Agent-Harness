@@ -102,6 +102,21 @@ describe("EvaluationService", () => {
     database.close();
   });
 
+  it("automatically captures matching applied failures as one L0 Failure Case", async () => {
+    const { database, executions, evaluations } = await fixture();
+    for (const index of [1, 2]) {
+      const attempt = startVerifying(executions);
+      evaluations.evaluateAttempt({
+        projectId: "p1", attemptId: attempt.attemptId, proposedVerdict: "failed", riskSummary: "same assertion mismatch",
+      });
+    }
+    expect(database.all<{ maturity_level: string }>("SELECT maturity_level FROM failure_cases WHERE project_id = 'p1'"))
+      .toEqual([{ maturity_level: "L0_observed" }]);
+    expect(database.all("SELECT id FROM failure_case_occurrences")).toHaveLength(2);
+    expect(database.all("SELECT id FROM failure_reproduction_revisions WHERE reproduction_mode = 'observed'")).toHaveLength(1);
+    database.close();
+  });
+
   it("records success as uncertain while a blocking Plan Drift is unresolved", async () => {
     const { database, executions, evaluations } = await fixture();
     const attempt = startVerifying(executions);

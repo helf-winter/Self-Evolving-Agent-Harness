@@ -10,6 +10,7 @@ import { newId, nowIso } from "../domain/ids.js";
 import type { TaskNodeInput } from "../domain/task-tree.js";
 import { canonicalJson } from "../domain/trace.js";
 import type { RuntimeDatabase } from "../storage/database.js";
+import { FailureCaseService } from "./failure-case-service.js";
 
 interface EvaluationAttemptRow {
   id: string;
@@ -45,7 +46,11 @@ export interface AppliedLifecycleTransition extends LifecycleTransitionDecision 
 }
 
 export class EvaluationService {
-  constructor(private readonly database: RuntimeDatabase) {}
+  private readonly failures: FailureCaseService;
+
+  constructor(private readonly database: RuntimeDatabase, failures?: FailureCaseService) {
+    this.failures = failures ?? new FailureCaseService(database);
+  }
 
   evaluateAttempt(input: {
     projectId: string;
@@ -116,6 +121,9 @@ export class EvaluationService {
       } else if (decision.applied) {
         this.database.run("UPDATE execution_attempts SET status = ?, completed_at = ? WHERE id = ?", decision.targetStatus, createdAt, attempt.id);
         this.database.run("UPDATE task_nodes SET status = ? WHERE id = ?", decision.targetStatus, attempt.task_node_id);
+      }
+      if (verdict === "failed" && decision.applied) {
+        this.failures.captureFailedEvaluationWithinTransaction({ projectId: input.projectId, evaluationId });
       }
     });
 
