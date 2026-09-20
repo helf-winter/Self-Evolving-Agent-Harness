@@ -126,6 +126,8 @@ export function rewriteTaskTreeDocumentForClone(input: {
 }): TaskTreeDocument {
   const { document, nodeIds, artifactIds, sourceRoot, targetRoot } = input;
   return {
+    ...(document.planningVersion ? { planningVersion: document.planningVersion } : {}),
+    ...(document.planningContext ? { planningContext: document.planningContext } : {}),
     nodes: document.nodes.map((node) => rewriteNode(node, nodeIds)),
     relations: document.relations.map((relation) => ({
       ...relation,
@@ -134,6 +136,11 @@ export function rewriteTaskTreeDocumentForClone(input: {
       ...(relation.artifactId ? { artifactId: requireMappedId(artifactIds, relation.artifactId, "Artifact") } : {}),
     })),
     artifacts: document.artifacts.map((artifact) => rewriteArtifact(artifact, artifactIds, sourceRoot, targetRoot)),
+    ...(document.skeletonCriteria ? {
+      skeletonCriteria: document.skeletonCriteria.map((criterion) => ({
+        ...criterion, branchNodeId: requireMappedId(nodeIds, criterion.branchNodeId, "Task Node"),
+      })),
+    } : {}),
     ...(document.artifactLinks ? {
       artifactLinks: document.artifactLinks.map((link) => ({
         ...link,

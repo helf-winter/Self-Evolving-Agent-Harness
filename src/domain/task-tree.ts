@@ -32,10 +32,39 @@ export interface TaskRelationInput {
   artifactId?: string;
 }
 
+export interface PlannedEffectInput {
+  id: string;
+  riskLevel: "low" | "medium" | "high" | "irreversible";
+  targetRef: string;
+  summary: string;
+  mitigation: string | null;
+}
+
+export interface TaskPlanningContext {
+  goal: string;
+  scopeBoundaries: string[];
+  exclusions: string[];
+  unresolvedQuestions: string[];
+  unresolvedDecisions: string[];
+  plannedEffects: PlannedEffectInput[];
+}
+
+export interface SkeletonAcceptanceInput {
+  id: string;
+  branchNodeId: string;
+  expectedArtifacts: string[];
+  requiredContracts: string[];
+  verificationCommands: string[];
+  readinessConditions: string[];
+}
+
 export interface TaskTreeDocument {
+  planningVersion?: 1;
+  planningContext?: TaskPlanningContext;
   nodes: TaskNodeInput[];
   relations: TaskRelationInput[];
   artifacts: ArtifactInput[];
+  skeletonCriteria?: SkeletonAcceptanceInput[];
   artifactLinks?: TaskArtifactLinkInput[];
   artifactRelations?: ArtifactRelationInput[];
   artifactContracts?: ArtifactContractInput[];
