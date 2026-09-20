@@ -981,4 +981,31 @@ export const migrations: Migration[] = [{
     CREATE INDEX trace_project_run_time_idx
       ON trace_events(project_id, session_id, occurred_at DESC, id DESC);
   `,
+}, {
+  version: 13,
+  sql: `
+    ALTER TABLE task_trees ADD COLUMN archived_at TEXT;
+    ALTER TABLE task_trees ADD COLUMN archived_from_status TEXT;
+
+    CREATE TABLE task_tree_collection_transitions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      action TEXT NOT NULL CHECK(action IN ('selected', 'archived', 'restored')),
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      previous_selected_tree_id TEXT REFERENCES task_trees(id) ON DELETE SET NULL,
+      selected_tree_id TEXT REFERENCES task_trees(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX task_tree_collection_transition_history_idx
+      ON task_tree_collection_transitions(project_id, tree_id, created_at DESC, id DESC);
+
+    CREATE TRIGGER task_tree_collection_transitions_no_update
+      BEFORE UPDATE ON task_tree_collection_transitions
+      BEGIN SELECT RAISE(ABORT, 'task tree collection transitions are immutable'); END;
+    CREATE TRIGGER task_tree_collection_transitions_no_delete
+      BEFORE DELETE ON task_tree_collection_transitions
+      BEGIN SELECT RAISE(ABORT, 'task tree collection transitions are immutable'); END;
+  `,
 }];

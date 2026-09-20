@@ -18,13 +18,13 @@ describe("RuntimeDatabase", () => {
   it("applies migrations once and persists data across reopen", async () => {
     const filename = await databasePath();
     const first = new RuntimeDatabase(filename);
-    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }]);
+    expect(first.all<{ version: number }>("SELECT version FROM schema_migrations")).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }]);
     first.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES (?, ?, ?, ?)", "p1", "/work/a", "2026-01-01", "2026-01-01");
     first.close();
 
     const reopened = new RuntimeDatabase(filename);
     expect(reopened.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", "p1")).toEqual({ canonical_path: "/work/a" });
-    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(12);
+    expect(reopened.all("SELECT version FROM schema_migrations")).toHaveLength(13);
     reopened.close();
   });
 
@@ -337,6 +337,27 @@ describe("RuntimeDatabase", () => {
     database.run("INSERT INTO trace_events (id, project_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('e1', 'p1', 'run-1', 'UserPromptSubmit', '{}', 'now', 'e1')");
     expect(database.get<{ execution_context_json: string }>("SELECT execution_context_json FROM trace_events WHERE id = 'e1'"))
       .toEqual({ execution_context_json: "{}" });
+    database.close();
+  });
+
+  it("adds reversible Task Tree archive metadata and constrained collection transitions", async () => {
+    const database = new RuntimeDatabase(await databasePath());
+    expect(database.all<{ name: string }>("PRAGMA table_info(task_trees)").map((column) => column.name))
+      .toEqual(expect.arrayContaining(["archived_at", "archived_from_status"]));
+    expect(database.all<{ name: string }>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_tree_collection_transitions'",
+    )).toEqual([{ name: "task_tree_collection_transitions" }]);
+
+    database.run("INSERT INTO projects (id, canonical_path, created_at, updated_at) VALUES ('p1', '/work/a', 'now', 'now')");
+    database.run("INSERT INTO task_trees (id, project_id, title, status, created_at, updated_at) VALUES ('t1', 'p1', 'Tree', 'draft', 'now', 'now')");
+    expect(database.get<{ archived_at: string | null; archived_from_status: string | null }>(
+      "SELECT archived_at, archived_from_status FROM task_trees WHERE id = 't1'",
+    )).toEqual({ archived_at: null, archived_from_status: null });
+
+    database.run("INSERT INTO task_tree_collection_transitions (id, project_id, tree_id, action, from_status, to_status, previous_selected_tree_id, selected_tree_id, created_at) VALUES ('c1', 'p1', 't1', 'selected', 'draft', 'draft', NULL, 't1', 'now')");
+    expect(() => database.run("INSERT INTO task_tree_collection_transitions (id, project_id, tree_id, action, from_status, to_status, created_at) VALUES ('bad', 'p1', 't1', 'deleted', 'draft', 'deleted', 'now')")).toThrow();
+    expect(() => database.run("UPDATE task_tree_collection_transitions SET to_status = 'confirmed' WHERE id = 'c1'")).toThrow();
+    expect(() => database.run("DELETE FROM task_tree_collection_transitions WHERE id = 'c1'")).toThrow();
     database.close();
   });
 });
