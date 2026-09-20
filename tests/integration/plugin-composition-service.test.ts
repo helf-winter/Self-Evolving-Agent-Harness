@@ -84,4 +84,143 @@ describe("PluginCompositionService registration and reconciliation", () => {
       .toThrow(expect.objectContaining({ code: "plugin_composition_invalid" }));
     database.close();
   });
+
+  it("previews and atomically activates an incompatible revision while pausing dependents", async () => {
+    const { database, service } = await fixture();
+    service.registerRevision({
+      pluginId: "provider", manifest: manifest({ provides: [{ contractId: "trace", version: "1" }] }),
+    });
+    service.registerRevision({
+      pluginId: "consumer", manifest: manifest({ requires: [{ contractId: "trace", version: "1" }] }),
+    });
+    const old = service.getPluginDetail("provider");
+    const preview = service.previewReplacement({
+      pluginId: "provider",
+      manifest: manifest({ revision: "2.0.0", provides: [{ contractId: "trace", version: "2" }] }),
+    });
+    expect(preview).toMatchObject({
+      status: "previewed", contractDiff: { compatibility: "incompatible", removedProvides: ["trace@1"] },
+      affectedPluginIds: ["consumer", "provider"], suspensionOrder: ["consumer", "provider"],
+    });
+    expect(service.getPluginDetail("provider").plugin.currentRevision).toBe("1.0.0");
+    const executed = service.executeReplacement({
+      replacementId: preview.replacementId,
+      registrationDispositions: [{
+        registrationId: old.registrations[0]!.registrationId, action: "disposed",
+        evidenceRefs: ["binding-event:unregister-v1"], residualImpact: "",
+      }],
+      effectDispositions: [{
+        effectId: old.effects[0]!.effectId, action: "inverse_applied", observedBaselineRef: null,
+        evidenceRefs: ["binding-event:inverse-v1"], residualImpact: "",
+      }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["binding-event:activate-v2"],
+    });
+    expect(executed).toMatchObject({ status: "completed", activated: true, blockedRegistrationIds: [], blockedEffectIds: [] });
+    expect(service.getPluginDetail("provider")).toMatchObject({
+      plugin: { currentRevision: "2.0.0", compositionState: "active" },
+      revisions: expect.arrayContaining([
+        expect.objectContaining({ revision: "1.0.0", status: "replaced" }),
+        expect.objectContaining({ revision: "2.0.0", status: "active" }),
+      ]),
+    });
+    expect(service.getPluginDetail("consumer").plugin).toMatchObject({
+      compositionState: "pending_dependency", missingRequirements: ["trace@1"],
+    });
+    expect(service.getReplacementDetail(preview.replacementId)).toMatchObject({
+      replacement: { status: "completed" },
+      registrationDisposals: [expect.objectContaining({ disposalStatus: "disposed" })],
+      effectDisposals: [expect.objectContaining({ disposalStatus: "disposed" })],
+    });
+    database.close();
+  });
+
+  it("persists baseline conflicts without partial activation and allows an evidence-backed retry", async () => {
+    const { database, service } = await fixture();
+    const versioned = manifest({ provides: [{ contractId: "trace", version: "1" }] });
+    versioned.effects[0] = {
+      ...versioned.effects[0]!, effectType: "version_reversible", baselineRef: "hash:v1",
+      inverseOperation: "restore:v1",
+    };
+    service.registerRevision({ pluginId: "provider", manifest: versioned });
+    const old = service.getPluginDetail("provider");
+    const preview = service.previewReplacement({
+      pluginId: "provider", manifest: manifest({ revision: "2.0.0", provides: [{ contractId: "trace", version: "1" }] }),
+    });
+    const registrationDispositions = [{
+      registrationId: old.registrations[0]!.registrationId, action: "disposed" as const,
+      evidenceRefs: ["unregister"], residualImpact: "",
+    }];
+    const conflict = service.executeReplacement({
+      replacementId: preview.replacementId, registrationDispositions,
+      effectDispositions: [{
+        effectId: old.effects[0]!.effectId, action: "inverse_applied", observedBaselineRef: "hash:changed",
+        evidenceRefs: ["inverse-attempt"], residualImpact: "baseline mismatch",
+      }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["activate-v2"],
+    });
+    expect(conflict).toMatchObject({ status: "disposing", activated: false, blockedEffectIds: [old.effects[0]!.effectId] });
+    expect(service.getPluginDetail("provider").plugin.currentRevision).toBe("1.0.0");
+
+    expect(service.executeReplacement({
+      replacementId: preview.replacementId, registrationDispositions,
+      effectDispositions: [{
+        effectId: old.effects[0]!.effectId, action: "inverse_applied", observedBaselineRef: "hash:v1",
+        evidenceRefs: ["inverse-success"], residualImpact: "",
+      }],
+      activationVerdict: "succeeded", activationEvidenceRefs: ["activate-v2"],
+    })).toMatchObject({ status: "completed", activated: true });
+    expect(service.getReplacementDetail(preview.replacementId).effectDisposals).toHaveLength(2);
+    database.close();
+  });
+
+  it("recovers the old revision after failed candidate activation and propagates provider disposal/reactivation", async () => {
+    const { database, service } = await fixture();
+    service.registerRevision({
+      pluginId: "provider", manifest: manifest({ provides: [{ contractId: "trace", version: "1" }] }),
+    });
+    service.registerRevision({
+      pluginId: "consumer", manifest: manifest({ requires: [{ contractId: "trace", version: "1" }] }),
+    });
+    const old = service.getPluginDetail("provider");
+    const preview = service.previewReplacement({
+      pluginId: "provider", manifest: manifest({ revision: "2.0.0", provides: [{ contractId: "trace", version: "1" }] }),
+    });
+    const failed = service.executeReplacement({
+      replacementId: preview.replacementId,
+      registrationDispositions: [{
+        registrationId: old.registrations[0]!.registrationId, action: "disposed",
+        evidenceRefs: ["unregister"], residualImpact: "",
+      }],
+      effectDispositions: [{
+        effectId: old.effects[0]!.effectId, action: "inverse_applied", observedBaselineRef: null,
+        evidenceRefs: ["inverse"], residualImpact: "",
+      }],
+      activationVerdict: "failed", activationEvidenceRefs: ["activation-failure"],
+    });
+    expect(failed).toMatchObject({ status: "replacement_failed", activated: false, needsRecovery: true });
+    expect(service.getPluginDetail("provider").plugin.compositionState).toBe("needs_recovery");
+    expect(service.recoverReplacement({
+      replacementId: preview.replacementId, recoveryVerdict: "restored", evidenceRefs: ["restore-v1"],
+    })).toMatchObject({ status: "rolled_back", restored: true });
+    expect(service.getPluginDetail("provider").plugin).toMatchObject({ currentRevision: "1.0.0", compositionState: "active" });
+
+    const current = service.getPluginDetail("provider");
+    expect(service.disposePlugin({
+      pluginId: "provider",
+      registrationDispositions: [{
+        registrationId: current.registrations[0]!.registrationId, action: "disposed",
+        evidenceRefs: ["unregister-provider"], residualImpact: "",
+      }],
+      effectDispositions: [{
+        effectId: current.effects[0]!.effectId, action: "inverse_applied", observedBaselineRef: null,
+        evidenceRefs: ["remove-provider-effect"], residualImpact: "",
+      }],
+    })).toMatchObject({ compositionState: "disposed" });
+    expect(service.getPluginDetail("consumer").plugin.compositionState).toBe("pending_dependency");
+    expect(service.reactivatePlugin({ pluginId: "provider", evidenceRefs: ["binding-reloaded"] })).toMatchObject({
+      compositionState: "active",
+    });
+    expect(service.getPluginDetail("consumer").plugin.compositionState).toBe("active");
+    database.close();
+  });
 });

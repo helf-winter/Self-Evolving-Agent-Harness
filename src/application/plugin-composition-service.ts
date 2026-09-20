@@ -1,11 +1,19 @@
 import { HarnessError } from "../domain/errors.js";
 import { newId, nowIso } from "../domain/ids.js";
 import {
+  comparePluginContracts,
+  computePluginDependencyImpactClosure,
   contractKey,
+  decideRegistrationDisposal,
   validatePluginManifest,
   type PluginCompositionState,
+  type PluginRegistrationDisposalAction,
   type PluginRevisionManifest,
 } from "../domain/plugin-composition.js";
+import {
+  decideEffectDisposition,
+  type EffectDispositionAction,
+} from "../domain/composition.js";
 import { canonicalJson } from "../domain/trace.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 
@@ -25,6 +33,39 @@ interface RevisionRow {
   manifest_json: string;
   status: string;
   created_at: string;
+}
+
+interface ReplacementRow {
+  id: string;
+  plugin_id: string;
+  old_revision_id: string;
+  candidate_revision_id: string;
+  contract_diff_json: string;
+  affected_plugin_ids_json: string;
+  suspension_order_json: string;
+  effect_risk_summary_json: string;
+  prior_plugin_states_json: string;
+  status: string;
+  disposal_result_refs_json: string;
+  activation_evidence_refs_json: string;
+  recovery_result_json: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+interface RegistrationDispositionInput {
+  registrationId: string;
+  action: PluginRegistrationDisposalAction;
+  evidenceRefs: string[];
+  residualImpact: string;
+}
+
+interface EffectDispositionInput {
+  effectId: string;
+  action: EffectDispositionAction;
+  observedBaselineRef: string | null;
+  evidenceRefs: string[];
+  residualImpact: string;
 }
 
 function decodeCursor(cursor?: string): number {
@@ -83,6 +124,235 @@ export class PluginCompositionService {
     });
     this.reconcile();
     return { ...this.summary(pluginId), revisionId, created: true };
+  }
+
+  previewReplacement(input: { pluginId: string; manifest: PluginRevisionManifest }) {
+    const plugin = this.requirePlugin(input.pluginId);
+    if (!plugin.current_revision_id || ["disposed", "replacing", "needs_recovery"].includes(plugin.composition_state)) {
+      throw new HarnessError("plugin_composition_invalid", "Plugin is not available for replacement preview");
+    }
+    const errors = validatePluginManifest(input.manifest);
+    if (errors.length) throw new HarnessError("plugin_composition_invalid", "Plugin manifest is invalid", { errors });
+    if (this.database.get(
+      "SELECT id FROM runtime_plugin_revisions WHERE plugin_id = ? AND revision = ?",
+      input.pluginId, input.manifest.revision,
+    )) throw new HarnessError("plugin_composition_invalid", "Plugin revision already exists");
+    const oldRevision = this.database.get<RevisionRow>(
+      "SELECT * FROM runtime_plugin_revisions WHERE id = ?", plugin.current_revision_id,
+    )!;
+    const oldManifest = JSON.parse(oldRevision.manifest_json) as PluginRevisionManifest;
+    const available = this.database.all<{ contract_id: string; contract_version: string }>(`
+      SELECT c.contract_id, c.contract_version FROM runtime_plugin_contracts c
+      JOIN runtime_plugin_revisions r ON r.id = c.plugin_revision_id
+      JOIN runtime_plugins p ON p.current_revision_id = r.id
+      WHERE c.direction = 'provides' AND p.composition_state = 'active' AND p.id <> ?
+      ORDER BY c.contract_id, c.contract_version
+    `, input.pluginId).map((row) => ({ contractId: row.contract_id, version: row.contract_version }));
+    const contractDiff = comparePluginContracts({
+      oldProvides: oldManifest.provides, oldRequires: oldManifest.requires,
+      candidateProvides: input.manifest.provides, candidateRequires: input.manifest.requires,
+      availableProviderContracts: available,
+    });
+    const edges = this.database.all<{ provider_plugin_id: string; consumer_plugin_id: string }>(
+      "SELECT provider_plugin_id, consumer_plugin_id FROM runtime_plugin_dependency_edges WHERE active = 1",
+    ).map((row) => ({ providerPluginId: row.provider_plugin_id, consumerPluginId: row.consumer_plugin_id }));
+    const impact = computePluginDependencyImpactClosure({ replacedPluginId: input.pluginId, dependencyEdges: edges });
+    const effectRows = this.database.all<{ effect_type: string }>(
+      "SELECT effect_type FROM runtime_plugin_effects WHERE plugin_revision_id = ? AND disposal_status = 'active'",
+      plugin.current_revision_id,
+    );
+    const effectRiskSummary = effectRows.reduce<Record<string, number>>((summary, row) => {
+      summary[row.effect_type] = (summary[row.effect_type] ?? 0) + 1;
+      return summary;
+    }, {});
+    const priorStates = Object.fromEntries(impact.affectedPluginIds.map((pluginId) => {
+      const row = this.requirePlugin(pluginId);
+      return [pluginId, row.composition_state];
+    }));
+    const candidateRevisionId = newId();
+    const replacementId = newId();
+    const timestamp = nowIso();
+    this.database.transaction(() => {
+      this.database.run(`INSERT INTO runtime_plugin_revisions (
+        id, plugin_id, revision, manifest_json, status, created_at
+      ) VALUES (?, ?, ?, ?, 'candidate', ?)`, candidateRevisionId, input.pluginId,
+      input.manifest.revision, canonicalJson(input.manifest), timestamp);
+      this.insertManifestChildren(candidateRevisionId, input.manifest, timestamp);
+      this.database.run(`INSERT INTO runtime_plugin_replacement_records (
+        id, plugin_id, old_revision_id, candidate_revision_id, contract_diff_json,
+        affected_plugin_ids_json, suspension_order_json, effect_risk_summary_json,
+        prior_plugin_states_json, status, disposal_result_refs_json,
+        activation_evidence_refs_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'previewed', '[]', '[]', ?)`,
+      replacementId, input.pluginId, plugin.current_revision_id, candidateRevisionId,
+      canonicalJson(contractDiff), canonicalJson(impact.affectedPluginIds), canonicalJson(impact.suspensionOrder),
+      canonicalJson(effectRiskSummary), canonicalJson(priorStates), timestamp);
+    });
+    return {
+      replacementId, pluginId: input.pluginId, oldRevisionId: plugin.current_revision_id,
+      candidateRevisionId, status: "previewed", contractDiff,
+      affectedPluginIds: impact.affectedPluginIds, suspensionOrder: impact.suspensionOrder,
+      effectRiskSummary,
+    };
+  }
+
+  executeReplacement(input: {
+    replacementId: string;
+    registrationDispositions: RegistrationDispositionInput[];
+    effectDispositions: EffectDispositionInput[];
+    activationVerdict: "succeeded" | "failed";
+    activationEvidenceRefs: string[];
+  }) {
+    if (!input.activationEvidenceRefs.length) {
+      throw new HarnessError("plugin_composition_invalid", "Plugin activation evidence is required");
+    }
+    const replacement = this.requireReplacement(input.replacementId);
+    if (!["previewed", "disposing"].includes(replacement.status)) {
+      throw new HarnessError("plugin_composition_invalid", "Plugin replacement is not executable in its current state");
+    }
+    const oldRegistrations = this.database.all<{ id: string; disposer_ref: string }>(
+      "SELECT id, disposer_ref FROM runtime_plugin_registrations WHERE plugin_revision_id = ? ORDER BY id",
+      replacement.old_revision_id,
+    );
+    const oldEffects = this.database.all<{
+      id: string; effect_type: "reversible" | "version_reversible" | "compensatable" | "irreversible";
+      target_ref: string; baseline_ref: string | null;
+    }>("SELECT id, effect_type, target_ref, baseline_ref FROM runtime_plugin_effects WHERE plugin_revision_id = ? ORDER BY id",
+      replacement.old_revision_id);
+    this.requireCompleteDispositionSet(oldRegistrations.map((row) => row.id), input.registrationDispositions.map((row) => row.registrationId), "registration");
+    this.requireCompleteDispositionSet(oldEffects.map((row) => row.id), input.effectDispositions.map((row) => row.effectId), "effect");
+
+    const outcome = this.database.transaction(() => {
+      const createdAt = nowIso();
+      const resultIds: string[] = [];
+      const blockedRegistrationIds: string[] = [];
+      const blockedEffectIds: string[] = [];
+      for (const registration of oldRegistrations) {
+        const disposition = input.registrationDispositions.find((item) => item.registrationId === registration.id)!;
+        const decision = decideRegistrationDisposal({
+          disposerDeclared: Boolean(registration.disposer_ref.trim()), action: disposition.action,
+          evidenceCount: disposition.evidenceRefs.length,
+        });
+        const resultId = newId(); resultIds.push(resultId);
+        this.database.run(`INSERT INTO runtime_plugin_registration_disposals (
+          id, replacement_id, plugin_registration_id, disposition_action, disposal_status,
+          evidence_refs_json, residual_impact, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, resultId, input.replacementId, registration.id,
+        disposition.action, decision.status, canonicalJson(disposition.evidenceRefs), disposition.residualImpact, createdAt);
+        if (!decision.canProceed) blockedRegistrationIds.push(registration.id);
+      }
+      for (const effect of oldEffects) {
+        const disposition = input.effectDispositions.find((item) => item.effectId === effect.id)!;
+        const sharedOwnerCount = this.database.get<{ count: number }>(`
+          SELECT count(*) AS count FROM runtime_plugin_effects e
+          JOIN runtime_plugin_revisions r ON r.id = e.plugin_revision_id
+          JOIN runtime_plugins p ON p.current_revision_id = r.id
+          WHERE e.id <> ? AND e.target_ref = ? AND e.disposal_status = 'active' AND p.composition_state = 'active'
+        `, effect.id, effect.target_ref)?.count ?? 0;
+        const decision = decideEffectDisposition({
+          effectType: effect.effect_type, action: disposition.action, ownershipMatches: true,
+          baselineMatches: effect.effect_type !== "version_reversible" || effect.baseline_ref === disposition.observedBaselineRef,
+          hasSharedActiveOwner: sharedOwnerCount > 0, evidenceCount: disposition.evidenceRefs.length,
+        });
+        const resultId = newId(); resultIds.push(resultId);
+        this.database.run(`INSERT INTO runtime_plugin_effect_disposals (
+          id, replacement_id, plugin_effect_id, disposition_action, disposal_capability,
+          disposal_status, observed_baseline_ref, evidence_refs_json, residual_impact, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, resultId, input.replacementId, effect.id,
+        disposition.action, decision.capability, decision.status, disposition.observedBaselineRef,
+        canonicalJson(disposition.evidenceRefs), disposition.residualImpact, createdAt);
+        if (!decision.canProceed) blockedEffectIds.push(effect.id);
+      }
+      if (blockedRegistrationIds.length || blockedEffectIds.length) {
+        this.database.run(`UPDATE runtime_plugin_replacement_records
+          SET status = 'disposing', disposal_result_refs_json = ? WHERE id = ?`,
+        canonicalJson(resultIds), input.replacementId);
+        return { status: "disposing", activated: false, needsRecovery: false, blockedRegistrationIds, blockedEffectIds };
+      }
+
+      const suspensionOrder = JSON.parse(replacement.suspension_order_json) as string[];
+      for (const pluginId of suspensionOrder) {
+        const plugin = this.requirePlugin(pluginId);
+        if (plugin.composition_state === "disposed") continue;
+        const toState: PluginCompositionState = pluginId === replacement.plugin_id ? "replacing" : "suspending";
+        if (plugin.composition_state !== toState) {
+          this.database.run("UPDATE runtime_plugins SET composition_state = ?, updated_at = ? WHERE id = ?", toState, createdAt, pluginId);
+          this.transition(pluginId, plugin.current_revision_id, plugin.composition_state, toState,
+            "plugin_replacement_suspension", input.replacementId, createdAt);
+        }
+      }
+      this.applyDispositionStatuses(input.registrationDispositions, input.effectDispositions, createdAt);
+      this.database.run(`UPDATE runtime_plugin_replacement_records SET status = 'activating',
+        disposal_result_refs_json = ?, activation_evidence_refs_json = ? WHERE id = ?`,
+      canonicalJson(resultIds), canonicalJson(input.activationEvidenceRefs), input.replacementId);
+
+      if (input.activationVerdict === "failed") {
+        const needsRecovery = input.registrationDispositions.some((item) => item.action === "disposed")
+          || input.effectDispositions.some((item) => item.action !== "retain");
+        this.database.run("UPDATE runtime_plugin_revisions SET status = 'failed' WHERE id = ?", replacement.candidate_revision_id);
+        this.database.run(`UPDATE runtime_plugin_replacement_records
+          SET status = 'replacement_failed', completed_at = ? WHERE id = ?`, createdAt, input.replacementId);
+        const current = this.requirePlugin(replacement.plugin_id);
+        const target: PluginCompositionState = needsRecovery ? "needs_recovery" : "active";
+        this.database.run("UPDATE runtime_plugins SET composition_state = ?, updated_at = ? WHERE id = ?", target, createdAt, replacement.plugin_id);
+        this.transition(replacement.plugin_id, replacement.old_revision_id, current.composition_state, target,
+          "candidate_activation_failed", input.replacementId, createdAt);
+        return { status: "replacement_failed", activated: false, needsRecovery, blockedRegistrationIds, blockedEffectIds };
+      }
+
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'replaced' WHERE id = ?", replacement.old_revision_id);
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'candidate' WHERE id = ?", replacement.candidate_revision_id);
+      this.database.run(`UPDATE runtime_plugins SET current_revision_id = ?, composition_state = 'pending_dependency',
+        missing_requirements_json = '[]', updated_at = ? WHERE id = ?`,
+      replacement.candidate_revision_id, createdAt, replacement.plugin_id);
+      this.database.run(`UPDATE runtime_plugin_replacement_records
+        SET status = 'completed', completed_at = ? WHERE id = ?`, createdAt, input.replacementId);
+      this.transition(replacement.plugin_id, replacement.candidate_revision_id, "replacing", "pending_dependency",
+        "candidate_revision_activated", input.replacementId, createdAt);
+      return { status: "completed", activated: true, needsRecovery: false, blockedRegistrationIds, blockedEffectIds };
+    });
+    if (outcome.status !== "disposing") this.reconcile();
+    return outcome;
+  }
+
+  recoverReplacement(input: {
+    replacementId: string; recoveryVerdict: "restored" | "failed"; evidenceRefs: string[];
+  }) {
+    if (!input.evidenceRefs.length) throw new HarnessError("plugin_composition_invalid", "Recovery evidence is required");
+    const replacement = this.requireReplacement(input.replacementId);
+    if (replacement.status !== "replacement_failed") {
+      throw new HarnessError("plugin_composition_invalid", "Plugin replacement is not recoverable in its current state");
+    }
+    const plugin = this.requirePlugin(replacement.plugin_id);
+    if (input.recoveryVerdict === "failed") {
+      this.database.run("UPDATE runtime_plugin_replacement_records SET recovery_result_json = ? WHERE id = ?",
+        canonicalJson({ recoveryVerdict: "failed", evidenceRefs: input.evidenceRefs }), input.replacementId);
+      return { status: "replacement_failed", restored: false };
+    }
+    const compensated = this.database.get<{ count: number }>(`
+      SELECT count(*) AS count FROM runtime_plugin_effect_disposals d
+      JOIN runtime_plugin_effects e ON e.id = d.plugin_effect_id
+      WHERE d.replacement_id = ? AND e.effect_type IN ('compensatable', 'irreversible')
+        AND d.disposal_status IN ('compensated', 'not_disposable')
+    `, input.replacementId)?.count ?? 0;
+    if (compensated > 0) throw new HarnessError("plugin_composition_invalid", "Compensated or irreversible Plugin effects cannot be described as restored");
+    const timestamp = nowIso();
+    this.database.transaction(() => {
+      this.database.run("UPDATE runtime_plugin_registrations SET status = 'active', disposed_at = NULL WHERE plugin_revision_id = ?", replacement.old_revision_id);
+      this.database.run("UPDATE runtime_plugin_effects SET disposal_status = 'active', disposed_at = NULL WHERE plugin_revision_id = ?", replacement.old_revision_id);
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'active' WHERE id = ?", replacement.old_revision_id);
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'failed' WHERE id = ?", replacement.candidate_revision_id);
+      this.database.run(`UPDATE runtime_plugins SET current_revision_id = ?, composition_state = 'pending_dependency',
+        missing_requirements_json = '[]', updated_at = ? WHERE id = ?`,
+      replacement.old_revision_id, timestamp, replacement.plugin_id);
+      this.database.run(`UPDATE runtime_plugin_replacement_records SET status = 'rolled_back',
+        recovery_result_json = ?, completed_at = ? WHERE id = ?`,
+      canonicalJson({ recoveryVerdict: "restored", evidenceRefs: input.evidenceRefs }), timestamp, input.replacementId);
+      this.transition(replacement.plugin_id, replacement.old_revision_id, plugin.composition_state, "pending_dependency",
+        "old_revision_restored", input.replacementId, timestamp);
+    });
+    this.reconcile();
+    return { status: "rolled_back", restored: true };
   }
 
   reconcile() {
@@ -169,21 +439,152 @@ export class PluginCompositionService {
     };
   }
 
+  disposePlugin(input: {
+    pluginId: string;
+    registrationDispositions: RegistrationDispositionInput[];
+    effectDispositions: EffectDispositionInput[];
+  }) {
+    const plugin = this.requirePlugin(input.pluginId);
+    if (!plugin.current_revision_id || plugin.composition_state === "disposed") {
+      throw new HarnessError("plugin_composition_invalid", "Plugin is not disposable in its current state");
+    }
+    const registrations = this.database.all<{ id: string; disposer_ref: string }>(
+      "SELECT id, disposer_ref FROM runtime_plugin_registrations WHERE plugin_revision_id = ? ORDER BY id", plugin.current_revision_id,
+    );
+    const effects = this.database.all<{
+      id: string; effect_type: "reversible" | "version_reversible" | "compensatable" | "irreversible";
+      target_ref: string; baseline_ref: string | null;
+    }>("SELECT id, effect_type, target_ref, baseline_ref FROM runtime_plugin_effects WHERE plugin_revision_id = ? ORDER BY id", plugin.current_revision_id);
+    this.requireCompleteDispositionSet(registrations.map((row) => row.id), input.registrationDispositions.map((row) => row.registrationId), "registration");
+    this.requireCompleteDispositionSet(effects.map((row) => row.id), input.effectDispositions.map((row) => row.effectId), "effect");
+    const timestamp = nowIso();
+    const blockedRegistrationIds: string[] = [];
+    const blockedEffectIds: string[] = [];
+    this.database.transaction(() => {
+      for (const registration of registrations) {
+        const disposition = input.registrationDispositions.find((item) => item.registrationId === registration.id)!;
+        const decision = decideRegistrationDisposal({
+          disposerDeclared: Boolean(registration.disposer_ref.trim()), action: disposition.action,
+          evidenceCount: disposition.evidenceRefs.length,
+        });
+        this.database.run(`INSERT INTO runtime_plugin_registration_disposals (
+          id, replacement_id, plugin_registration_id, disposition_action, disposal_status,
+          evidence_refs_json, residual_impact, created_at
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?)`, newId(), registration.id, disposition.action,
+        decision.status, canonicalJson(disposition.evidenceRefs), disposition.residualImpact, timestamp);
+        if (!decision.canProceed) blockedRegistrationIds.push(registration.id);
+      }
+      for (const effect of effects) {
+        const disposition = input.effectDispositions.find((item) => item.effectId === effect.id)!;
+        const sharedOwnerCount = this.activeSharedEffectOwnerCount(effect.id, effect.target_ref);
+        const decision = decideEffectDisposition({
+          effectType: effect.effect_type, action: disposition.action, ownershipMatches: true,
+          baselineMatches: effect.effect_type !== "version_reversible" || effect.baseline_ref === disposition.observedBaselineRef,
+          hasSharedActiveOwner: sharedOwnerCount > 0, evidenceCount: disposition.evidenceRefs.length,
+        });
+        this.database.run(`INSERT INTO runtime_plugin_effect_disposals (
+          id, replacement_id, plugin_effect_id, disposition_action, disposal_capability,
+          disposal_status, observed_baseline_ref, evidence_refs_json, residual_impact, created_at
+        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`, newId(), effect.id, disposition.action,
+        decision.capability, decision.status, disposition.observedBaselineRef,
+        canonicalJson(disposition.evidenceRefs), disposition.residualImpact, timestamp);
+        if (!decision.canProceed) blockedEffectIds.push(effect.id);
+      }
+      if (blockedRegistrationIds.length || blockedEffectIds.length) return;
+      this.applyDispositionStatuses(input.registrationDispositions, input.effectDispositions, timestamp);
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'disposed' WHERE id = ?", plugin.current_revision_id);
+      this.database.run(`UPDATE runtime_plugins SET composition_state = 'disposed', missing_requirements_json = '[]', updated_at = ? WHERE id = ?`,
+        timestamp, input.pluginId);
+      this.transition(input.pluginId, plugin.current_revision_id, plugin.composition_state, "disposed", "plugin_disposed", null, timestamp);
+    });
+    if (blockedRegistrationIds.length || blockedEffectIds.length) {
+      return { ...this.summary(input.pluginId), disposed: false, blockedRegistrationIds, blockedEffectIds };
+    }
+    this.reconcile();
+    return { ...this.summary(input.pluginId), disposed: true, blockedRegistrationIds, blockedEffectIds };
+  }
+
+  reactivatePlugin(input: { pluginId: string; evidenceRefs: string[] }) {
+    if (!input.evidenceRefs.length) throw new HarnessError("plugin_composition_invalid", "Plugin reactivation evidence is required");
+    const plugin = this.requirePlugin(input.pluginId);
+    if (!plugin.current_revision_id || plugin.composition_state !== "disposed") {
+      throw new HarnessError("plugin_composition_invalid", "Plugin is not disposed");
+    }
+    const timestamp = nowIso();
+    this.database.transaction(() => {
+      this.database.run("UPDATE runtime_plugin_revisions SET status = 'candidate' WHERE id = ?", plugin.current_revision_id);
+      this.database.run("UPDATE runtime_plugin_registrations SET status = 'declared', disposed_at = NULL WHERE plugin_revision_id = ?", plugin.current_revision_id);
+      this.database.run("UPDATE runtime_plugin_effects SET disposal_status = 'pending', disposed_at = NULL WHERE plugin_revision_id = ?", plugin.current_revision_id);
+      this.database.run(`UPDATE runtime_plugins SET composition_state = 'pending_dependency',
+        missing_requirements_json = '[]', updated_at = ? WHERE id = ?`, timestamp, input.pluginId);
+      this.transition(input.pluginId, plugin.current_revision_id, "disposed", "pending_dependency",
+        `binding_reactivated:${input.evidenceRefs.length}`, null, timestamp);
+    });
+    this.reconcile();
+    return this.summary(input.pluginId);
+  }
+
+  getReplacementDetail(replacementId: string) {
+    const replacement = this.requireReplacement(replacementId);
+    const registrationDisposals = this.database.all<{
+      id: string; plugin_registration_id: string; disposition_action: string; disposal_status: string;
+      evidence_refs_json: string; residual_impact: string; created_at: string;
+    }>("SELECT * FROM runtime_plugin_registration_disposals WHERE replacement_id = ? ORDER BY rowid", replacementId);
+    const effectDisposals = this.database.all<{
+      id: string; plugin_effect_id: string; disposition_action: string; disposal_capability: string;
+      disposal_status: string; observed_baseline_ref: string | null; evidence_refs_json: string;
+      residual_impact: string; created_at: string;
+    }>("SELECT * FROM runtime_plugin_effect_disposals WHERE replacement_id = ? ORDER BY rowid", replacementId);
+    return {
+      replacement: {
+        replacementId: replacement.id, pluginId: replacement.plugin_id,
+        oldRevisionId: replacement.old_revision_id, candidateRevisionId: replacement.candidate_revision_id,
+        contractDiff: JSON.parse(replacement.contract_diff_json) as unknown,
+        affectedPluginIds: JSON.parse(replacement.affected_plugin_ids_json) as string[],
+        suspensionOrder: JSON.parse(replacement.suspension_order_json) as string[],
+        effectRiskSummary: JSON.parse(replacement.effect_risk_summary_json) as unknown,
+        priorPluginStates: JSON.parse(replacement.prior_plugin_states_json) as unknown,
+        status: replacement.status,
+        activationEvidenceRefs: JSON.parse(replacement.activation_evidence_refs_json) as string[],
+        recoveryResult: replacement.recovery_result_json ? JSON.parse(replacement.recovery_result_json) as unknown : null,
+        createdAt: replacement.created_at, completedAt: replacement.completed_at,
+      },
+      registrationDisposals: registrationDisposals.map((row) => ({
+        disposalId: row.id, registrationId: row.plugin_registration_id, action: row.disposition_action,
+        disposalStatus: row.disposal_status, evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
+        residualImpact: row.residual_impact, createdAt: row.created_at,
+      })),
+      effectDisposals: effectDisposals.map((row) => ({
+        disposalId: row.id, effectId: row.plugin_effect_id, action: row.disposition_action,
+        capability: row.disposal_capability, disposalStatus: row.disposal_status,
+        observedBaselineRef: row.observed_baseline_ref,
+        evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
+        residualImpact: row.residual_impact, createdAt: row.created_at,
+      })),
+    };
+  }
+
   getPluginDetail(pluginId: string) {
     const plugin = this.requirePlugin(pluginId);
     const revisions = this.database.all<RevisionRow>(
       "SELECT * FROM runtime_plugin_revisions WHERE plugin_id = ? ORDER BY created_at, rowid", pluginId,
     );
     const currentRevisionId = plugin.current_revision_id;
-    const registrations = currentRevisionId ? this.database.all<{
+    const registrations = this.database.all<{
       id: string; registration_key: string; registration_kind: string; target_ref: string;
       disposer_kind: string; disposer_ref: string; status: string; created_at: string; disposed_at: string | null;
-    }>("SELECT * FROM runtime_plugin_registrations WHERE plugin_revision_id = ? ORDER BY registration_key", currentRevisionId) : [];
-    const effects = currentRevisionId ? this.database.all<{
+      plugin_revision_id: string;
+    }>(`SELECT rg.* FROM runtime_plugin_registrations rg
+        JOIN runtime_plugin_revisions r ON r.id = rg.plugin_revision_id
+        WHERE r.plugin_id = ? ORDER BY r.created_at, rg.registration_key`, pluginId);
+    const effects = this.database.all<{
       id: string; effect_key: string; effect_type: string; target_ref: string; operation: string;
       baseline_ref: string | null; inverse_operation: string | null; compensation_operation: string | null;
       evidence_refs_json: string; disposal_status: string; created_at: string; disposed_at: string | null;
-    }>("SELECT * FROM runtime_plugin_effects WHERE plugin_revision_id = ? ORDER BY effect_key", currentRevisionId) : [];
+      plugin_revision_id: string;
+    }>(`SELECT e.* FROM runtime_plugin_effects e
+        JOIN runtime_plugin_revisions r ON r.id = e.plugin_revision_id
+        WHERE r.plugin_id = ? ORDER BY r.created_at, e.effect_key`, pluginId);
     const dependencies = this.database.all<{
       id: string; consumer_plugin_id: string; consumer_revision_id: string; provider_plugin_id: string;
       provider_revision_id: string; contract_id: string; contract_version: string; active: number;
@@ -202,12 +603,12 @@ export class PluginCompositionService {
         status: row.status, createdAt: row.created_at,
       })),
       registrations: registrations.map((row) => ({
-        registrationId: row.id, key: row.registration_key, kind: row.registration_kind,
+        registrationId: row.id, revisionId: row.plugin_revision_id, key: row.registration_key, kind: row.registration_kind,
         targetRef: row.target_ref, disposerKind: row.disposer_kind, disposerRef: row.disposer_ref,
         status: row.status, createdAt: row.created_at, disposedAt: row.disposed_at,
       })),
       effects: effects.map((row) => ({
-        effectId: row.id, key: row.effect_key, effectType: row.effect_type,
+        effectId: row.id, revisionId: row.plugin_revision_id, key: row.effect_key, effectType: row.effect_type,
         targetRef: row.target_ref, operation: row.operation, baselineRef: row.baseline_ref,
         inverseOperation: row.inverse_operation, compensationOperation: row.compensation_operation,
         evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
@@ -255,6 +656,42 @@ export class PluginCompositionService {
     }
   }
 
+  private requireCompleteDispositionSet(expected: string[], actual: string[], kind: string): void {
+    const expectedSorted = [...expected].sort();
+    const actualSorted = [...actual].sort();
+    if (new Set(actual).size !== actual.length || canonicalJson(expectedSorted) !== canonicalJson(actualSorted)) {
+      throw new HarnessError("plugin_composition_invalid", `Every old Plugin ${kind} must have exactly one disposition`);
+    }
+  }
+
+  private applyDispositionStatuses(
+    registrations: RegistrationDispositionInput[], effects: EffectDispositionInput[], disposedAt: string,
+  ): void {
+    for (const disposition of registrations) {
+      this.database.run(
+        "UPDATE runtime_plugin_registrations SET status = ?, disposed_at = ? WHERE id = ?",
+        disposition.action === "disposed" ? "disposed" : "retained", disposedAt, disposition.registrationId,
+      );
+    }
+    for (const disposition of effects) {
+      const status = disposition.action === "inverse_applied" ? "disposed"
+        : disposition.action === "compensation_applied" ? "compensated" : "not_disposable";
+      this.database.run(
+        "UPDATE runtime_plugin_effects SET disposal_status = ?, disposed_at = ? WHERE id = ?",
+        status, disposedAt, disposition.effectId,
+      );
+    }
+  }
+
+  private activeSharedEffectOwnerCount(effectId: string, targetRef: string): number {
+    return this.database.get<{ count: number }>(`
+      SELECT count(*) AS count FROM runtime_plugin_effects e
+      JOIN runtime_plugin_revisions r ON r.id = e.plugin_revision_id
+      JOIN runtime_plugins p ON p.current_revision_id = r.id
+      WHERE e.id <> ? AND e.target_ref = ? AND e.disposal_status = 'active' AND p.composition_state = 'active'
+    `, effectId, targetRef)?.count ?? 0;
+  }
+
   private activeProviderIndex(): Map<string, Array<{ pluginId: string; revisionId: string }>> {
     const rows = this.database.all<{
       plugin_id: string; revision_id: string; contract_id: string; contract_version: string;
@@ -282,6 +719,14 @@ export class PluginCompositionService {
     const plugin = this.database.get<PluginRow>("SELECT * FROM runtime_plugins WHERE id = ?", pluginId);
     if (!plugin) throw new HarnessError("not_found", "Runtime Plugin was not found");
     return plugin;
+  }
+
+  private requireReplacement(replacementId: string): ReplacementRow {
+    const replacement = this.database.get<ReplacementRow>(
+      "SELECT * FROM runtime_plugin_replacement_records WHERE id = ?", replacementId,
+    );
+    if (!replacement) throw new HarnessError("not_found", "Runtime Plugin Replacement was not found");
+    return replacement;
   }
 
   private mapPlugin(row: PluginRow) {
