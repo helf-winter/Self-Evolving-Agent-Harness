@@ -1,6 +1,7 @@
 import { HarnessError } from "../domain/errors.js";
 import {
   evaluateExperienceEligibility,
+  evaluateSkillPromotion,
   type EvolutionEvaluationFact,
   type SkillSideEffectRisk,
   type SkillTestType,
@@ -63,6 +64,17 @@ export interface SkillValidationRunView {
   runMode: SkillValidationRunMode;
   repetitionIndex: number;
   verdict: SkillValidationRunVerdict;
+  created: boolean;
+  createdAt: string;
+}
+
+export interface SkillValidationReportView {
+  reportId: string;
+  candidateRevisionId: string;
+  verdict: "pass" | "fail" | "uncertain";
+  rejectionReasons: string[];
+  evidenceRefs: string[];
+  promoted: boolean;
   created: boolean;
   createdAt: string;
 }
@@ -415,6 +427,119 @@ export class EvolutionService {
       return {
         validationRunId, skillTestCaseId: input.skillTestCaseId, runMode: input.runMode,
         repetitionIndex: input.repetitionIndex, verdict: input.verdict, created: true, createdAt,
+      };
+    });
+  }
+
+  generateSkillValidationReport(input: {
+    projectId: string;
+    candidateRevisionId: string;
+    idempotencyKey: string;
+  }): SkillValidationReportView {
+    this.requireCandidateProject(input.candidateRevisionId, input.projectId);
+    const idempotencyKey = input.idempotencyKey.trim();
+    if (!idempotencyKey) throw new HarnessError("skill_validation_rejected", "validation report requires an idempotency key");
+    return this.database.transaction(() => {
+      const existing = this.database.get<{
+        id: string; skill_candidate_revision_id: string; promotion_verdict: "pass" | "fail" | "uncertain";
+        rejection_reasons_json: string; evidence_refs_json: string; created_at: string;
+      }>("SELECT id, skill_candidate_revision_id, promotion_verdict, rejection_reasons_json, evidence_refs_json, created_at FROM skill_validation_reports WHERE idempotency_key = ?", idempotencyKey);
+      if (existing) {
+        if (existing.skill_candidate_revision_id !== input.candidateRevisionId) {
+          throw new HarnessError("skill_validation_rejected", "idempotency key was already used for another candidate report");
+        }
+        return {
+          reportId: existing.id, candidateRevisionId: input.candidateRevisionId,
+          verdict: existing.promotion_verdict,
+          rejectionReasons: JSON.parse(existing.rejection_reasons_json) as string[],
+          evidenceRefs: JSON.parse(existing.evidence_refs_json) as string[],
+          promoted: existing.promotion_verdict === "pass", created: false, createdAt: existing.created_at,
+        };
+      }
+      const cases = this.database.all<{
+        id: string; test_type: SkillTestType; quality_status: "draft" | "schema_valid" | "reproducible" | "discriminative" | "stable" | "accepted" | "rejected";
+      }>("SELECT id, test_type, quality_status FROM skill_test_cases WHERE skill_candidate_revision_id = ? ORDER BY created_at, id", input.candidateRevisionId)
+        .map((row) => ({ testCaseId: row.id, testType: row.test_type, qualityStatus: row.quality_status }));
+      const runRows = this.database.all<{
+        skill_test_case_id: string; test_type: SkillTestType; run_mode: SkillValidationRunMode;
+        repetition_index: number; verdict: SkillValidationRunVerdict; side_effect_risk: SkillSideEffectRisk;
+        token_usage: number | null; tool_call_count: number | null; evidence_refs_json: string;
+      }>(`
+        SELECT r.skill_test_case_id, c.test_type, r.run_mode, r.repetition_index, r.verdict,
+               r.side_effect_risk, r.token_usage, r.tool_call_count, r.evidence_refs_json
+        FROM skill_validation_runs r
+        JOIN skill_test_cases c ON c.id = r.skill_test_case_id
+        WHERE r.skill_candidate_revision_id = ?
+        ORDER BY c.test_type, r.skill_test_case_id, r.run_mode, r.repetition_index
+      `, input.candidateRevisionId);
+      const runs = runRows.map((row) => ({
+        testCaseId: row.skill_test_case_id, testType: row.test_type, runMode: row.run_mode,
+        repetitionIndex: row.repetition_index, verdict: row.verdict, sideEffectRisk: row.side_effect_risk,
+      }));
+      const result = evaluateSkillPromotion({ cases, runs });
+      const summarize = (mode: SkillValidationRunMode) => {
+        const selected = runRows.filter((row) => row.run_mode === mode);
+        return {
+          runCount: selected.length,
+          passed: selected.filter((row) => row.verdict === "passed").length,
+          failed: selected.filter((row) => row.verdict === "failed").length,
+          blocked: selected.filter((row) => row.verdict === "blocked").length,
+          invalid: selected.filter((row) => row.verdict === "invalid").length,
+          tokenUsage: selected.reduce((sum, row) => sum + (row.token_usage ?? 0), 0),
+          toolCallCount: selected.reduce((sum, row) => sum + (row.tool_call_count ?? 0), 0),
+        };
+      };
+      const typeResult = (testType: SkillTestType) => ({
+        acceptedCases: cases.filter((item) => item.testType === testType && item.qualityStatus === "accepted").map((item) => item.testCaseId),
+        runs: runRows.filter((row) => row.test_type === testType).map((row) => ({
+          testCaseId: row.skill_test_case_id, mode: row.run_mode, repetition: row.repetition_index, verdict: row.verdict,
+        })),
+      });
+      const evidenceRefs = [...new Set(runRows.flatMap((row) => JSON.parse(row.evidence_refs_json) as string[]))].sort();
+      const riskSummary = {
+        maximum: runRows.some((row) => row.side_effect_risk === "irreversible") ? "irreversible"
+          : runRows.some((row) => row.side_effect_risk === "high") ? "high"
+            : runRows.some((row) => row.side_effect_risk === "medium") ? "medium"
+              : runRows.some((row) => row.side_effect_risk === "low") ? "low" : "none",
+        byRisk: Object.fromEntries(["none", "low", "medium", "high", "irreversible"].map((risk) => [
+          risk, runRows.filter((row) => row.side_effect_risk === risk).length,
+        ])),
+      };
+      const runGroups = new Map<string, typeof runRows>();
+      for (const row of runRows) {
+        const key = `${row.skill_test_case_id}:${row.run_mode}`;
+        runGroups.set(key, [...(runGroups.get(key) ?? []), row]);
+      }
+      const stabilityResult = {
+        requiredRepetitions: 3,
+        groups: [...runGroups.values()].map((group) => ({
+          repetitions: group.length,
+          stable: new Set(group.map((row) => row.verdict)).size <= 1,
+        })),
+      };
+      const reportId = newId();
+      const createdAt = nowIso();
+      this.database.run(`
+        INSERT INTO skill_validation_reports (
+          id, skill_candidate_revision_id, baseline_summary_json, enabled_summary_json,
+          replay_result_json, holdout_result_json, negative_applicability_result_json,
+          stability_result_json, risk_summary_json, promotion_verdict, rejection_reasons_json,
+          evidence_refs_json, idempotency_key, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, reportId, input.candidateRevisionId, canonicalJson(summarize("no_skill_baseline")),
+      canonicalJson(summarize("skill_enabled")), canonicalJson(typeResult("real_failure_replay")),
+      canonicalJson(typeResult("holdout")), canonicalJson(typeResult("negative_applicability")),
+      canonicalJson(stabilityResult), canonicalJson(riskSummary), result.verdict,
+      canonicalJson(result.reasons), canonicalJson(evidenceRefs), idempotencyKey, createdAt);
+      const nextStatus = result.verdict === "pass" ? "promoted" : "failed";
+      this.database.run("UPDATE skill_candidate_revisions SET validation_status = ? WHERE id = ?", nextStatus, input.candidateRevisionId);
+      this.database.run(`
+        UPDATE skills SET validation_status = ?, promoted_at = CASE WHEN ? = 'promoted' THEN ? ELSE promoted_at END, updated_at = ?
+        WHERE current_candidate_revision_id = ?
+      `, nextStatus, nextStatus, createdAt, createdAt, input.candidateRevisionId);
+      return {
+        reportId, candidateRevisionId: input.candidateRevisionId, verdict: result.verdict,
+        rejectionReasons: result.reasons, evidenceRefs, promoted: result.verdict === "pass", created: true, createdAt,
       };
     });
   }

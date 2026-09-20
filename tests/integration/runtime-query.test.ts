@@ -156,4 +156,30 @@ describe("RuntimeQueryService", () => {
     expect(() => service.getFailureCaseDetail("p2", failure.failureCaseId)).toThrow(expect.objectContaining({ code: "not_found" }));
     database.close();
   });
+
+  it("returns Tree-centered Experience candidates and complete Skill validation detail", async () => {
+    const { database, tree, service } = await fixture();
+    const nodeId = tree.document.nodes[0]!.id;
+    const nodeRevision = database.get<{ id: string }>("SELECT id FROM task_node_revisions WHERE node_id = ?", nodeId)!;
+    database.run("INSERT INTO experiences (id, source_project_id, source_tree_id, source_task_node_id, source_task_node_revision_id, source_success_attempt_id, source_success_evaluation_id, source_failure_attempt_ids_json, source_failure_evaluation_ids_json, summary, applicable_context_json, verification_json, related_artifact_ids_json, created_at) VALUES ('xp-query', 'p1', ?, ?, ?, 'a1', 'v1', '[\"a0\",\"a00\"]', '[\"v0\",\"v00\"]', 'Recovered route', '{}', '{}', '[\"route-file\"]', '2030-01-03')", tree.treeId, nodeId, nodeRevision.id);
+    database.run("INSERT INTO skills (id, stable_key, name, trigger_context_json, current_candidate_revision_id, validation_status, created_at, updated_at) VALUES ('skill-query', 'route-repair', 'Route repair', '{}', 'candidate-query', 'promoted', '2030-01-04', '2030-01-05')");
+    database.run("INSERT INTO skill_candidate_revisions (id, skill_id, revision_number, source_experience_ids_json, instruction_snapshot, frozen_at, validation_status) VALUES ('candidate-query', 'skill-query', 1, '[\"xp-query\"]', 'Verify the focused route first.', '2030-01-04', 'promoted')");
+    database.run("INSERT INTO skill_test_cases (id, skill_candidate_revision_id, test_type, source_refs_json, target_behavior, applicable_context_json, fixture_setup_json, input_json, expected_result_json, oracle_json, reproduction_command, timeout_ms, generated_by, quality_status, leakage_policy, created_at) VALUES ('case-query', 'candidate-query', 'holdout', '[\"scenario\"]', 'Generalizes', '{}', '{}', '{}', '{}', '{}', 'npm test', 30000, 'agent', 'accepted', 'no leakage', '2030-01-05')");
+    database.run("INSERT INTO skill_validation_runs (id, skill_candidate_revision_id, skill_test_case_id, run_mode, repetition_index, verdict, token_usage, tool_call_count, side_effect_risk, side_effect_summary, evidence_refs_json, created_at) VALUES ('run-query', 'candidate-query', 'case-query', 'skill_enabled', 1, 'passed', 10, 1, 'none', 'isolated', '[\"e2\"]', '2030-01-06')");
+    database.run("INSERT INTO skill_validation_reports (id, skill_candidate_revision_id, baseline_summary_json, enabled_summary_json, replay_result_json, holdout_result_json, negative_applicability_result_json, stability_result_json, risk_summary_json, promotion_verdict, rejection_reasons_json, evidence_refs_json, idempotency_key, created_at) VALUES ('report-query', 'candidate-query', '{}', '{}', '{}', '{}', '{}', '{}', '{}', 'pass', '[]', '[\"e2\"]', 'report-query', '2030-01-07')");
+
+    const list = service.getSkillEvolutionCandidates("p1", { treeId: tree.treeId, nodeId, limit: 10 });
+    expect(list.items).toEqual([expect.objectContaining({ experienceId: "xp-query", summary: "Recovered route", candidateCount: 1 })]);
+    const detail = service.getSkillCandidateDetail("p1", "candidate-query");
+    expect(detail).toMatchObject({
+      skill: { skillId: "skill-query", stableKey: "route-repair", validationStatus: "promoted" },
+      candidate: { candidateRevisionId: "candidate-query", revisionNumber: 1, sourceExperienceIds: ["xp-query"] },
+      experiences: [expect.objectContaining({ experienceId: "xp-query", treeId: tree.treeId, nodeId })],
+      testCases: [expect.objectContaining({ testCaseId: "case-query", testType: "holdout", qualityStatus: "accepted" })],
+      validationRuns: [expect.objectContaining({ validationRunId: "run-query", verdict: "passed" })],
+      reports: [expect.objectContaining({ reportId: "report-query", verdict: "pass" })],
+    });
+    expect(() => service.getSkillCandidateDetail("p2", "candidate-query")).toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
 });

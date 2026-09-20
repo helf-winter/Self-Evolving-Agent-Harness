@@ -585,6 +585,144 @@ export class RuntimeQueryService {
     };
   }
 
+  getSkillEvolutionCandidates(projectId: string, query: {
+    treeId?: string;
+    nodeId?: string;
+    limit?: number;
+    cursor?: string;
+  }) {
+    this.requireProject(projectId);
+    if (query.treeId) this.requireTree(projectId, query.treeId);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const offset = decodeCursor(query.cursor);
+    const filters = ["source_project_id = ?"];
+    const params: Array<string | number> = [projectId];
+    if (query.treeId) { filters.push("source_tree_id = ?"); params.push(query.treeId); }
+    if (query.nodeId) { filters.push("source_task_node_id = ?"); params.push(query.nodeId); }
+    const rows = this.database.all<{
+      id: string; source_tree_id: string; source_task_node_id: string; source_task_node_revision_id: string;
+      source_success_attempt_id: string; source_success_evaluation_id: string;
+      source_failure_attempt_ids_json: string; source_failure_evaluation_ids_json: string;
+      summary: string; applicable_context_json: string; verification_json: string;
+      related_artifact_ids_json: string; created_at: string;
+    }>(`SELECT * FROM experiences WHERE ${filters.join(" AND ")} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+    ...params, limit + 1, offset);
+    const candidates = this.database.all<{ id: string; source_experience_ids_json: string }>(
+      "SELECT id, source_experience_ids_json FROM skill_candidate_revisions",
+    );
+    return {
+      items: rows.slice(0, limit).map((row) => ({
+        experienceId: row.id, treeId: row.source_tree_id, nodeId: row.source_task_node_id,
+        nodeRevisionId: row.source_task_node_revision_id, successAttemptId: row.source_success_attempt_id,
+        successEvaluationId: row.source_success_evaluation_id,
+        failureAttemptIds: JSON.parse(row.source_failure_attempt_ids_json) as string[],
+        failureEvaluationIds: JSON.parse(row.source_failure_evaluation_ids_json) as string[],
+        summary: row.summary, applicableContext: JSON.parse(row.applicable_context_json) as unknown,
+        verification: JSON.parse(row.verification_json) as unknown,
+        relatedArtifactIds: JSON.parse(row.related_artifact_ids_json) as string[],
+        candidateCount: candidates.filter((candidate) =>
+          (JSON.parse(candidate.source_experience_ids_json) as string[]).includes(row.id)).length,
+        createdAt: row.created_at,
+      })),
+      nextCursor: rows.length > limit ? encodeCursor(offset + limit) : null,
+    };
+  }
+
+  getSkillCandidateDetail(projectId: string, candidateRevisionId: string) {
+    this.requireProject(projectId);
+    const row = this.database.get<{
+      id: string; skill_id: string; revision_number: number; source_experience_ids_json: string;
+      instruction_snapshot: string; frozen_at: string; candidate_status: string;
+      stable_key: string; name: string; trigger_context_json: string; skill_status: string;
+      current_candidate_revision_id: string | null; promoted_at: string | null; created_at: string; updated_at: string;
+    }>(`
+      SELECT c.id, c.skill_id, c.revision_number, c.source_experience_ids_json,
+             c.instruction_snapshot, c.frozen_at, c.validation_status AS candidate_status,
+             s.stable_key, s.name, s.trigger_context_json, s.validation_status AS skill_status,
+             s.current_candidate_revision_id, s.promoted_at, s.created_at, s.updated_at
+      FROM skill_candidate_revisions c JOIN skills s ON s.id = c.skill_id WHERE c.id = ?
+    `, candidateRevisionId);
+    if (!row) throw new HarnessError("not_found", "Skill candidate revision was not found");
+    const experienceIds = JSON.parse(row.source_experience_ids_json) as string[];
+    const experiences = experienceIds.length === 0 ? [] : this.database.all<{
+      id: string; source_project_id: string; source_tree_id: string; source_task_node_id: string;
+      source_task_node_revision_id: string; source_success_attempt_id: string; source_success_evaluation_id: string;
+      source_failure_attempt_ids_json: string; source_failure_evaluation_ids_json: string; summary: string; created_at: string;
+    }>(`SELECT id, source_project_id, source_tree_id, source_task_node_id, source_task_node_revision_id,
+               source_success_attempt_id, source_success_evaluation_id, source_failure_attempt_ids_json,
+               source_failure_evaluation_ids_json, summary, created_at
+        FROM experiences WHERE id IN (${experienceIds.map(() => "?").join(", ")}) ORDER BY created_at, id`, ...experienceIds);
+    if (!experienceIds.length || experiences.length !== experienceIds.length
+      || experiences.some((item) => item.source_project_id !== projectId)) {
+      throw new HarnessError("not_found", "Skill candidate revision was not found in this Project");
+    }
+    const testCases = this.database.all<{
+      id: string; test_type: string; source_refs_json: string; target_behavior: string;
+      applicable_context_json: string; fixture_setup_json: string; input_json: string;
+      expected_result_json: string; oracle_json: string; reproduction_command: string;
+      timeout_ms: number; generated_by: string; quality_status: string; leakage_policy: string; created_at: string;
+    }>("SELECT * FROM skill_test_cases WHERE skill_candidate_revision_id = ? ORDER BY created_at, id", candidateRevisionId);
+    const qualityResults = this.database.all<{
+      id: string; skill_test_case_id: string; verdict: string; evidence_refs_json: string; created_at: string;
+    }>(`SELECT q.id, q.skill_test_case_id, q.verdict, q.evidence_refs_json, q.created_at
+        FROM skill_test_quality_results q JOIN skill_test_cases c ON c.id = q.skill_test_case_id
+        WHERE c.skill_candidate_revision_id = ? ORDER BY q.created_at, q.id`, candidateRevisionId);
+    const runs = this.database.all<{
+      id: string; skill_test_case_id: string; run_mode: string; repetition_index: number; verdict: string;
+      token_usage: number | null; tool_call_count: number | null; side_effect_risk: string;
+      side_effect_summary: string; evidence_refs_json: string; created_at: string;
+    }>("SELECT * FROM skill_validation_runs WHERE skill_candidate_revision_id = ? ORDER BY skill_test_case_id, run_mode, repetition_index", candidateRevisionId);
+    const reports = this.database.all<{
+      id: string; promotion_verdict: string; rejection_reasons_json: string; evidence_refs_json: string; created_at: string;
+    }>("SELECT id, promotion_verdict, rejection_reasons_json, evidence_refs_json, created_at FROM skill_validation_reports WHERE skill_candidate_revision_id = ? ORDER BY created_at, id", candidateRevisionId);
+    return {
+      skill: {
+        skillId: row.skill_id, stableKey: row.stable_key, name: row.name,
+        triggerContext: JSON.parse(row.trigger_context_json) as unknown,
+        currentCandidateRevisionId: row.current_candidate_revision_id,
+        validationStatus: row.skill_status, promotedAt: row.promoted_at,
+        createdAt: row.created_at, updatedAt: row.updated_at,
+      },
+      candidate: {
+        candidateRevisionId: row.id, revisionNumber: row.revision_number,
+        sourceExperienceIds: experienceIds, instructionSnapshot: row.instruction_snapshot,
+        frozenAt: row.frozen_at, validationStatus: row.candidate_status,
+      },
+      experiences: experiences.map((item) => ({
+        experienceId: item.id, treeId: item.source_tree_id, nodeId: item.source_task_node_id,
+        nodeRevisionId: item.source_task_node_revision_id, successAttemptId: item.source_success_attempt_id,
+        successEvaluationId: item.source_success_evaluation_id,
+        failureAttemptIds: JSON.parse(item.source_failure_attempt_ids_json) as string[],
+        failureEvaluationIds: JSON.parse(item.source_failure_evaluation_ids_json) as string[],
+        summary: item.summary, createdAt: item.created_at,
+      })),
+      testCases: testCases.map((item) => ({
+        testCaseId: item.id, testType: item.test_type, sourceRefs: JSON.parse(item.source_refs_json) as string[],
+        targetBehavior: item.target_behavior, applicableContext: JSON.parse(item.applicable_context_json) as unknown,
+        fixtureSetup: JSON.parse(item.fixture_setup_json) as unknown, input: JSON.parse(item.input_json) as unknown,
+        expectedResult: JSON.parse(item.expected_result_json) as unknown, oracle: JSON.parse(item.oracle_json) as unknown,
+        reproductionCommand: item.reproduction_command, timeoutMs: item.timeout_ms, generatedBy: item.generated_by,
+        qualityStatus: item.quality_status, leakagePolicy: item.leakage_policy, createdAt: item.created_at,
+      })),
+      qualityResults: qualityResults.map((item) => ({
+        qualityResultId: item.id, testCaseId: item.skill_test_case_id, verdict: item.verdict,
+        evidenceRefs: JSON.parse(item.evidence_refs_json) as string[], createdAt: item.created_at,
+      })),
+      validationRuns: runs.map((item) => ({
+        validationRunId: item.id, testCaseId: item.skill_test_case_id, runMode: item.run_mode,
+        repetitionIndex: item.repetition_index, verdict: item.verdict, tokenUsage: item.token_usage,
+        toolCallCount: item.tool_call_count, sideEffectRisk: item.side_effect_risk,
+        sideEffectSummary: item.side_effect_summary, evidenceRefs: JSON.parse(item.evidence_refs_json) as string[],
+        createdAt: item.created_at,
+      })),
+      reports: reports.map((item) => ({
+        reportId: item.id, verdict: item.promotion_verdict,
+        rejectionReasons: JSON.parse(item.rejection_reasons_json) as string[],
+        evidenceRefs: JSON.parse(item.evidence_refs_json) as string[], createdAt: item.created_at,
+      })),
+    };
+  }
+
   private requireProject(projectId: string): void {
     if (!this.database.get("SELECT id FROM projects WHERE id = ?", projectId)) throw new HarnessError("not_found", "project was not found");
   }

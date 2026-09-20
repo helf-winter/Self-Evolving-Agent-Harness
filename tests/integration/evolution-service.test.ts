@@ -187,4 +187,57 @@ describe("EvolutionService Experience and candidate lifecycle", () => {
     })).toThrow(expect.objectContaining({ code: "skill_validation_rejected" }));
     database.close();
   });
+
+  it("builds a deterministic report and automatically promotes only a fully validated candidate", async () => {
+    const { database, service } = await fixture();
+    const candidate = eligibleCandidate(database, service);
+    const testTypes = ["real_failure_replay", "variation", "holdout", "negative_applicability"] as const;
+    const cases = [];
+    for (const [caseIndex, testType] of testTypes.entries()) {
+      const testCase = service.proposeSkillTestCase({
+        projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, testType,
+        sourceRefs: [`source-${testType}`], targetBehavior: `validates ${testType}`,
+        applicableContext: { testType }, fixtureSetup: { isolated: true }, input: { caseIndex },
+        expectedResult: { pass: true }, oracle: { kind: "predicate" },
+        reproductionCommand: `npm test -- ${testType}`, timeoutMs: 30_000,
+        generatedBy: testType === "holdout" ? "independent-agent" : "agent",
+        leakagePolicy: testType === "holdout" ? "no candidate instruction access" : "source-derived only",
+      });
+      addTrace(database, `quality-${caseIndex}`);
+      service.validateSkillTestQuality({
+        projectId: "p1", skillTestCaseId: testCase.testCaseId, idempotencyKey: `quality-${caseIndex}`,
+        schemaValid: true, fixtureIsolated: true, failureReproduced: true, oracleValid: true,
+        discriminative: true, stable: true, splitValid: true, evidenceRefs: [`quality-${caseIndex}`],
+      });
+      cases.push(testCase);
+    }
+    for (const [caseIndex, testCase] of cases.entries()) {
+      for (const runMode of ["no_skill_baseline", "skill_enabled"] as const) {
+        for (let repetitionIndex = 1; repetitionIndex <= 3; repetitionIndex += 1) {
+          const traceId = `run-${caseIndex}-${runMode}-${repetitionIndex}`;
+          addTrace(database, traceId);
+          service.recordSkillValidationRun({
+            projectId: "p1", candidateRevisionId: candidate.candidateRevisionId,
+            skillTestCaseId: testCase.testCaseId, runMode, repetitionIndex,
+            verdict: runMode === "no_skill_baseline" && testCase.testType === "real_failure_replay" ? "failed" : "passed",
+            tokenUsage: runMode === "skill_enabled" ? 100 : 80, toolCallCount: 4,
+            sideEffectRisk: "none", sideEffectSummary: "isolated fixture", evidenceRefs: [traceId],
+          });
+        }
+      }
+    }
+    const report = service.generateSkillValidationReport({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, idempotencyKey: "report-1",
+    });
+    expect(report).toMatchObject({ verdict: "pass", rejectionReasons: [], promoted: true, created: true });
+    expect(report.evidenceRefs).toHaveLength(24);
+    expect(service.generateSkillValidationReport({
+      projectId: "p1", candidateRevisionId: candidate.candidateRevisionId, idempotencyKey: "report-1",
+    })).toMatchObject({ reportId: report.reportId, verdict: "pass", promoted: true, created: false });
+    expect(database.get<{ validation_status: string }>("SELECT validation_status FROM skills WHERE id = ?", candidate.skillId))
+      .toEqual({ validation_status: "promoted" });
+    expect(database.get<{ validation_status: string }>("SELECT validation_status FROM skill_candidate_revisions WHERE id = ?", candidate.candidateRevisionId))
+      .toEqual({ validation_status: "promoted" });
+    database.close();
+  });
 });

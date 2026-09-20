@@ -32,6 +32,10 @@ describe("Harness MCP binding", () => {
       "harness_propose_plan_drift_resolution", "harness_propose_user_change", "harness_resolve_runtime_confirmation",
       "harness_get_failure_cases", "harness_get_failure_case_detail",
       "harness_add_failure_reproduction", "harness_validate_failure_reproduction",
+      "harness_get_skill_evolution_candidates", "harness_get_skill_candidate_detail",
+      "harness_freeze_skill_candidate", "harness_propose_skill_test_case",
+      "harness_validate_skill_test_quality", "harness_record_skill_validation_run",
+      "harness_generate_skill_validation_report",
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
@@ -54,6 +58,12 @@ describe("Harness MCP binding", () => {
     expect(tools.find((tool) => tool.name === "harness_validate_failure_reproduction")?.inputSchema).toMatchObject({
       properties: { observation: { properties: { preFixVerdict: { enum: ["red", "not_red", "not_run"] } } } },
     });
+    expect(tools.find((tool) => tool.name === "harness_propose_skill_test_case")?.inputSchema).toMatchObject({
+      properties: { testType: { enum: ["real_failure_replay", "variation", "holdout", "negative_applicability"] } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_record_skill_validation_run")?.inputSchema).toMatchObject({
+      properties: { runMode: { enum: ["no_skill_baseline", "skill_enabled"] }, sideEffectRisk: { enum: expect.any(Array) } },
+    });
     const created = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Runtime" } });
     expect(created.isError).not.toBe(true);
     const createdContent = (created as { content: Array<{ type: string; text?: string }> }).content;
@@ -75,6 +85,7 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_waiting_items", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_failure_cases", arguments: { cwd: project } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_get_skill_evolution_candidates", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {

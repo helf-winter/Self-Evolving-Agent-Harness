@@ -326,6 +326,87 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     idempotencyKey,
   })));
 
+  server.registerTool("harness_get_skill_evolution_candidates", {
+    description: "List eligible Experience records and candidate counts in the current Project and optional Task scope.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(),
+      limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
+    },
+  }, ({ cwd, treeId, nodeId, limit, cursor }) => guarded(async () => runtime.queries.getSkillEvolutionCandidates(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}) },
+  )));
+
+  server.registerTool("harness_get_skill_candidate_detail", {
+    description: "Get one Project-scoped frozen Skill candidate with source Experience, tests, quality results, runs, and reports.",
+    inputSchema: { cwd: cwdSchema, candidateRevisionId: z.string().min(1) },
+  }, ({ cwd, candidateRevisionId }) => guarded(async () => runtime.queries.getSkillCandidateDetail(
+    (await existingProject(cwd)).projectId, candidateRevisionId,
+  )));
+
+  server.registerTool("harness_freeze_skill_candidate", {
+    description: "Freeze an immutable Skill candidate revision from an eligible Project Experience.",
+    inputSchema: {
+      cwd: cwdSchema, experienceId: z.string().min(1), stableKey: z.string().min(1), name: z.string().min(1),
+      triggerContext: z.record(z.string(), z.unknown()), instructionSnapshot: z.string().min(1),
+    },
+  }, ({ cwd, experienceId, stableKey, name, triggerContext, instructionSnapshot }) => guarded(async () => runtime.evolution.freezeSkillCandidate({
+    projectId: (await existingProject(cwd)).projectId, experienceId, stableKey, name, triggerContext, instructionSnapshot,
+  })));
+
+  server.registerTool("harness_propose_skill_test_case", {
+    description: "Store a draft Skill test definition; quality approval is a separate evidence-backed operation.",
+    inputSchema: {
+      cwd: cwdSchema, candidateRevisionId: z.string().min(1),
+      testType: z.enum(["real_failure_replay", "variation", "holdout", "negative_applicability"]),
+      sourceRefs: z.array(z.string().min(1)).min(1), targetBehavior: z.string().min(1),
+      applicableContext: z.record(z.string(), z.unknown()), fixtureSetup: z.unknown(), input: z.unknown(),
+      expectedResult: z.unknown(), oracle: z.record(z.string(), z.unknown()),
+      reproductionCommand: z.string().min(1), timeoutMs: z.number().int().positive(),
+      generatedBy: z.string().min(1), leakagePolicy: z.string().min(1),
+    },
+  }, ({ cwd, candidateRevisionId, testType, sourceRefs, targetBehavior, applicableContext, fixtureSetup, input, expectedResult, oracle, reproductionCommand, timeoutMs, generatedBy, leakagePolicy }) => guarded(async () => runtime.evolution.proposeSkillTestCase({
+    projectId: (await existingProject(cwd)).projectId, candidateRevisionId, testType, sourceRefs,
+    targetBehavior, applicableContext, fixtureSetup, input, expectedResult, oracle,
+    reproductionCommand, timeoutMs, generatedBy, leakagePolicy,
+  })));
+
+  server.registerTool("harness_validate_skill_test_quality", {
+    description: "Validate a draft Skill test against schema, isolation, reproduction, Oracle, discrimination, stability, split, and Trace gates.",
+    inputSchema: {
+      cwd: cwdSchema, skillTestCaseId: z.string().min(1), idempotencyKey: z.string().min(1),
+      schemaValid: z.boolean(), fixtureIsolated: z.boolean(), failureReproduced: z.boolean(),
+      oracleValid: z.boolean(), discriminative: z.boolean(), stable: z.boolean(), splitValid: z.boolean(),
+      evidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ cwd, skillTestCaseId, idempotencyKey, schemaValid, fixtureIsolated, failureReproduced, oracleValid, discriminative, stable, splitValid, evidenceRefs }) => guarded(async () => runtime.evolution.validateSkillTestQuality({
+    projectId: (await existingProject(cwd)).projectId, skillTestCaseId, idempotencyKey,
+    schemaValid, fixtureIsolated, failureReproduced, oracleValid, discriminative, stable, splitValid, evidenceRefs,
+  })));
+
+  server.registerTool("harness_record_skill_validation_run", {
+    description: "Record one immutable baseline or Skill-enabled validation repetition with Trace, resource, and side-effect evidence.",
+    inputSchema: {
+      cwd: cwdSchema, candidateRevisionId: z.string().min(1), skillTestCaseId: z.string().min(1),
+      runMode: z.enum(["no_skill_baseline", "skill_enabled"]), repetitionIndex: z.number().int().positive(),
+      verdict: z.enum(["passed", "failed", "blocked", "invalid"]),
+      tokenUsage: z.number().int().min(0).nullable().optional(), toolCallCount: z.number().int().min(0).nullable().optional(),
+      sideEffectRisk: z.enum(["none", "low", "medium", "high", "irreversible"]),
+      sideEffectSummary: z.string().min(1), evidenceRefs: z.array(z.string().min(1)).min(1),
+    },
+  }, ({ cwd, candidateRevisionId, skillTestCaseId, runMode, repetitionIndex, verdict, tokenUsage, toolCallCount, sideEffectRisk, sideEffectSummary, evidenceRefs }) => guarded(async () => runtime.evolution.recordSkillValidationRun({
+    projectId: (await existingProject(cwd)).projectId, candidateRevisionId, skillTestCaseId,
+    runMode, repetitionIndex, verdict, sideEffectRisk, sideEffectSummary, evidenceRefs,
+    ...(tokenUsage !== undefined ? { tokenUsage } : {}), ...(toolCallCount !== undefined ? { toolCallCount } : {}),
+  })));
+
+  server.registerTool("harness_generate_skill_validation_report", {
+    description: "Aggregate deterministic comparison gates and automatically promote a Skill candidate only when every hard gate passes.",
+    inputSchema: { cwd: cwdSchema, candidateRevisionId: z.string().min(1), idempotencyKey: z.string().min(1) },
+  }, ({ cwd, candidateRevisionId, idempotencyKey }) => guarded(async () => runtime.evolution.generateSkillValidationReport({
+    projectId: (await existingProject(cwd)).projectId, candidateRevisionId, idempotencyKey,
+  })));
+
   server.registerTool("harness_start_node_attempt", {
     description: "Start an evidence-backed Execution Attempt for the current Task Node revision.",
     inputSchema: { cwd: cwdSchema, nodeId: z.string().min(1), expectedTreeRevisionId: z.string().min(1) },
