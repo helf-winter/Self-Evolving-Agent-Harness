@@ -66,7 +66,8 @@ export class ProjectCloneService {
 
     const trees = this.database.all<{
       id: string; title: string; status: string; current_revision_id: string | null;
-    }>("SELECT id, title, status, current_revision_id FROM task_trees WHERE project_id = ? ORDER BY created_at, id", source.id);
+      archived_at: string | null; archived_from_status: string | null;
+    }>("SELECT id, title, status, current_revision_id, archived_at, archived_from_status FROM task_trees WHERE project_id = ? ORDER BY created_at, id", source.id);
     const revisions = this.database.all<{
       id: string; tree_id: string; revision: number; document_json: string;
     }>(`SELECT r.id, r.tree_id, r.revision, r.document_json
@@ -169,7 +170,10 @@ export class ProjectCloneService {
 
   private copyTaskStructure(input: {
     cloneId: string; sourceProjectId: string; targetProjectId: string; sourcePath: string; targetPath: string; createdAt: string;
-    trees: Array<{ id: string; title: string; status: string; current_revision_id: string | null }>;
+    trees: Array<{
+      id: string; title: string; status: string; current_revision_id: string | null;
+      archived_at: string | null; archived_from_status: string | null;
+    }>;
     revisions: Array<{ id: string; tree_id: string; revision: number; document_json: string }>;
     nodes: Array<{ id: string; tree_id: string; parent_id: string | null; title: string; status: string }>;
     nodeRevisions: Array<{ id: string; node_id: string; tree_revision_id: string }>;
@@ -178,9 +182,11 @@ export class ProjectCloneService {
     const { maps } = input;
     for (const tree of input.trees) {
       this.database.run(`INSERT INTO task_trees (
-        id, project_id, title, status, current_revision_id, created_at, updated_at, cloned_from_task_tree_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, maps.trees.get(tree.id)!, input.targetProjectId, tree.title, tree.status,
-      tree.current_revision_id ? maps.revisions.get(tree.current_revision_id)! : null, input.createdAt, input.createdAt, tree.id);
+        id, project_id, title, status, current_revision_id, created_at, updated_at,
+        cloned_from_task_tree_id, archived_at, archived_from_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, maps.trees.get(tree.id)!, input.targetProjectId, tree.title, tree.status,
+      tree.current_revision_id ? maps.revisions.get(tree.current_revision_id)! : null, input.createdAt, input.createdAt, tree.id,
+      tree.archived_at, tree.archived_from_status);
       this.map(input.cloneId, "task_tree", tree.id, maps.trees.get(tree.id)!, input.createdAt);
     }
     for (const revision of input.revisions) {
@@ -360,14 +366,27 @@ export class ProjectCloneService {
     const sourceRuntime = this.database.get<{ selected_tree_id: string | null; selected_node_id: string | null }>(
       "SELECT selected_tree_id, selected_node_id FROM runtime_states WHERE project_id = ?", input.sourceProjectId,
     );
-    const firstTree = input.maps.trees.values().next().value as string | undefined;
-    const selectedTreeId = sourceRuntime?.selected_tree_id
-      ? input.maps.trees.get(sourceRuntime.selected_tree_id) ?? null : firstTree ?? null;
-    const selectedNodeId = sourceRuntime?.selected_node_id
+    const firstTree = this.database.get<{ id: string }>(
+      "SELECT id FROM task_trees WHERE project_id = ? AND status <> 'archived' ORDER BY created_at, id LIMIT 1",
+      input.targetProjectId,
+    )?.id ?? null;
+    const mappedSourceSelection = sourceRuntime?.selected_tree_id
+      ? input.maps.trees.get(sourceRuntime.selected_tree_id) ?? null : null;
+    const mappedSelectionStatus = mappedSourceSelection
+      ? this.database.get<{ status: string }>("SELECT status FROM task_trees WHERE id = ?", mappedSourceSelection)?.status
+      : undefined;
+    const selectedTreeId = mappedSelectionStatus && mappedSelectionStatus !== "archived"
+      ? mappedSourceSelection : firstTree;
+    const selectedNodeId = selectedTreeId && selectedTreeId === mappedSourceSelection && sourceRuntime?.selected_node_id
       ? input.maps.nodes.get(sourceRuntime.selected_node_id) ?? null : null;
     if (selectedTreeId) {
       this.database.run("INSERT INTO workflow_states (id, project_id, tree_id, stage, revision, active, updated_at) VALUES (?, ?, ?, 'task_tree_refinement', 1, 1, ?)",
         newId(), input.targetProjectId, selectedTreeId, input.createdAt);
+      this.database.run(`INSERT INTO task_tree_collection_transitions (
+        id, project_id, tree_id, action, from_status, to_status,
+        previous_selected_tree_id, selected_tree_id, created_at
+      ) SELECT ?, ?, id, 'selected', status, status, NULL, id, ? FROM task_trees WHERE id = ?`,
+      newId(), input.targetProjectId, input.createdAt, selectedTreeId);
     }
     this.database.run("INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at) VALUES (?, ?, ?, ?, ?)",
       input.targetProjectId, selectedTreeId, selectedNodeId, canonicalJson({

@@ -136,4 +136,23 @@ describe("ProjectCloneService", () => {
     expect(database.get("SELECT id FROM project_clone_records WHERE target_path = '/work/broken'")).toBeUndefined();
     database.close();
   });
+
+  it("preserves Task Tree archive metadata without selecting an archived clone", async () => {
+    const { database, service, treeId } = await fixture();
+    const taskTrees = new TaskTreeService(database);
+    database.run("UPDATE task_trees SET status = 'confirmed' WHERE id = ?", treeId);
+    taskTrees.archiveTaskTree({ projectId: "source", treeId });
+
+    const cloned = service.cloneProject({
+      sourceProjectId: "source", targetCanonicalPath: "/work/archive-copy", targetDisplayPath: "/work/archive-copy", platform: "linux",
+    });
+    expect(database.get<{ status: string; archived_at: string | null; archived_from_status: string | null }>(
+      "SELECT status, archived_at, archived_from_status FROM task_trees WHERE project_id = ?",
+      cloned.targetProjectId,
+    )).toMatchObject({ status: "archived", archived_at: expect.any(String), archived_from_status: "confirmed" });
+    expect(database.get<{ selected_tree_id: string | null }>("SELECT selected_tree_id FROM runtime_states WHERE project_id = ?", cloned.targetProjectId))
+      .toEqual({ selected_tree_id: null });
+    expect(database.all("SELECT id FROM workflow_states WHERE project_id = ? AND active = 1", cloned.targetProjectId)).toEqual([]);
+    database.close();
+  });
 });

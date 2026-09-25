@@ -119,6 +119,105 @@ describe("TaskTreeService", () => {
     database.close();
   });
 
+  it("keeps multiple roots while selecting only the newest tree and limiting deterministic candidates", async () => {
+    const { database, service } = await fixture();
+    const roots = [];
+    for (let index = 1; index <= 5; index += 1) {
+      roots.push(await service.createTaskRoot({ projectId: "p1", title: `Tree ${index}` }));
+      database.run("UPDATE task_trees SET updated_at = ? WHERE id = ?", `200${index}`, roots.at(-1)!.treeId);
+    }
+    expect(service.listTaskTreeCandidates({ projectId: "p1" })).toHaveLength(5);
+    const sixth = await service.createTaskRoot({ projectId: "p1", title: "Tree 6" });
+    database.run("UPDATE task_trees SET updated_at = '2006' WHERE id = ?", sixth.treeId);
+    expect(service.listTaskTreeCandidates({ projectId: "p1" }).map((candidate) => candidate.title))
+      .toEqual(["Tree 6", "Tree 5", "Tree 4"]);
+    expect(service.listTaskTreeCandidates({ projectId: "p1", query: "tree" })).toHaveLength(3);
+    expect(database.get<{ selected_tree_id: string }>("SELECT selected_tree_id FROM runtime_states WHERE project_id = 'p1'"))
+      .toEqual({ selected_tree_id: sixth.treeId });
+    expect(database.all<{ tree_id: string }>("SELECT tree_id FROM workflow_states WHERE project_id = 'p1' AND active = 1"))
+      .toEqual([{ tree_id: sixth.treeId }]);
+    expect(database.all("SELECT id FROM task_tree_collection_transitions WHERE project_id = 'p1' AND action = 'selected'"))
+      .toHaveLength(6);
+    database.close();
+  });
+
+  it("selects trees atomically and blocks switching, creating, or archiving across an active Attempt", async () => {
+    const { database, service } = await fixture();
+    const first = await service.createTaskRoot({ projectId: "p1", title: "First" });
+    const firstDraft = service.saveDraftRevision({ projectId: "p1", treeId: first.treeId, baseRevisionId: first.revisionId, document: validDocument });
+    const second = await service.createTaskRoot({ projectId: "p1", title: "Second" });
+    expect(service.selectTaskTree({ projectId: "p1", treeId: first.treeId })).toMatchObject({
+      treeId: first.treeId, previousSelectedTreeId: second.treeId, selected: true,
+    });
+    const leafRevision = database.get<{ id: string }>(
+      "SELECT id FROM task_node_revisions WHERE node_id = 'leaf' AND tree_revision_id = ?",
+      firstDraft.revisionId,
+    )!.id;
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at) VALUES ('active-attempt', 'p1', ?, 'leaf', ?, 1, 'running', 'now')", first.treeId, leafRevision);
+
+    expect(() => service.selectTaskTree({ projectId: "p1", treeId: second.treeId }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    expect(() => service.archiveTaskTree({ projectId: "p1", treeId: first.treeId }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    await expect(service.createTaskRoot({ projectId: "p1", title: "Blocked third" }))
+      .rejects.toMatchObject({ code: "task_tree_transition_rejected" });
+    expect(database.get<{ selected_tree_id: string }>("SELECT selected_tree_id FROM runtime_states WHERE project_id = 'p1'"))
+      .toEqual({ selected_tree_id: first.treeId });
+    expect(database.all("SELECT id FROM task_trees WHERE project_id = 'p1'")).toHaveLength(2);
+    database.close();
+  });
+
+  it("archives reversibly, hides archived candidates, and preserves immutable revisions", async () => {
+    const { database, service } = await fixture();
+    const first = await service.createTaskRoot({ projectId: "p1", title: "Historical" });
+    const draft = service.saveDraftRevision({ projectId: "p1", treeId: first.treeId, baseRevisionId: first.revisionId, document: validDocument });
+    database.run("UPDATE task_trees SET status = 'confirmed' WHERE id = ?", first.treeId);
+    const second = await service.createTaskRoot({ projectId: "p1", title: "Current" });
+
+    expect(service.archiveTaskTree({ projectId: "p1", treeId: first.treeId })).toMatchObject({
+      treeId: first.treeId, status: "archived", selectedTreeId: second.treeId,
+    });
+    expect(service.listTaskTreeCandidates({ projectId: "p1", query: first.treeId })).toEqual([]);
+    expect(service.listTaskTreeCandidates({ projectId: "p1", query: first.treeId, includeArchived: true }))
+      .toEqual([expect.objectContaining({ treeId: first.treeId, status: "archived", selected: false })]);
+    expect(service.getRevision("p1", first.treeId)).toMatchObject({ revisionId: draft.revisionId, revision: 2 });
+    expect(() => service.saveDraftRevision({ projectId: "p1", treeId: first.treeId, baseRevisionId: draft.revisionId, document: validDocument }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    expect(() => service.previewDraftChangeSet({ projectId: "p1", treeId: first.treeId, baseRevisionId: draft.revisionId, proposedDocument: branchedDocument }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    expect(() => service.scanPlanReadiness({ projectId: "p1", treeId: first.treeId }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+
+    expect(service.restoreTaskTree({ projectId: "p1", treeId: first.treeId })).toMatchObject({
+      treeId: first.treeId, status: "confirmed", selected: false, selectedTreeId: second.treeId,
+    });
+    expect(database.all("SELECT id FROM task_tree_revisions WHERE tree_id = ?", first.treeId)).toHaveLength(2);
+    expect(database.get<{ active: number }>("SELECT active FROM workflow_states WHERE tree_id = ?", first.treeId))
+      .toEqual({ active: 0 });
+    database.close();
+  });
+
+  it("clears selection when archiving the selected tree and rejects repeated or cross-project transitions", async () => {
+    const { database, service } = await fixture();
+    const local = await service.createTaskRoot({ projectId: "p1", title: "Local" });
+    const foreign = await service.createTaskRoot({ projectId: "p2", title: "Foreign" });
+    expect(() => service.selectTaskTree({ projectId: "p1", treeId: foreign.treeId }))
+      .toThrow(expect.objectContaining({ code: "not_found" }));
+    expect(service.archiveTaskTree({ projectId: "p1", treeId: local.treeId })).toMatchObject({
+      selected: false, selectedTreeId: null,
+    });
+    expect(database.get<{ selected_tree_id: string | null; selected_node_id: string | null }>(
+      "SELECT selected_tree_id, selected_node_id FROM runtime_states WHERE project_id = 'p1'",
+    )).toEqual({ selected_tree_id: null, selected_node_id: null });
+    expect(database.all("SELECT id FROM workflow_states WHERE project_id = 'p1' AND active = 1")).toEqual([]);
+    expect(() => service.archiveTaskTree({ projectId: "p1", treeId: local.treeId }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    service.restoreTaskTree({ projectId: "p1", treeId: local.treeId });
+    expect(() => service.restoreTaskTree({ projectId: "p1", treeId: local.treeId }))
+      .toThrow(expect.objectContaining({ code: "task_tree_transition_rejected" }));
+    database.close();
+  });
+
   it("records readiness for an exact branch scope and rejects unknown roots", async () => {
     const { database, service } = await fixture();
     const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });

@@ -5,6 +5,7 @@ import { newId, nowIso } from "../domain/ids.js";
 import { canonicalJson } from "../domain/trace.js";
 import { validateTaskTree, type TaskTreeDocument } from "../domain/task-tree.js";
 import { analyzeDraftImpact, analyzePlanReadiness, validateDraftStructure } from "../domain/task-refinement.js";
+import { restoredTaskTreeStatus, type TaskTreeCollectionAction } from "../domain/task-collection.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 
 interface TreeRow {
@@ -13,6 +14,8 @@ interface TreeRow {
   status: string;
   current_revision_id: string;
   updated_at: string;
+  archived_at: string | null;
+  archived_from_status: string | null;
 }
 
 interface RevisionRow {
@@ -52,13 +55,17 @@ export interface TaskTreeRevisionView {
 export class TaskTreeService {
   constructor(private readonly database: RuntimeDatabase) {}
 
-  listTaskTreeCandidates(input: { projectId: string; query?: string }) {
+  listTaskTreeCandidates(input: { projectId: string; query?: string; includeArchived?: boolean }) {
     const trees = this.database.all<TreeRow>(
-      "SELECT id, title, status, current_revision_id, updated_at FROM task_trees WHERE project_id = ? ORDER BY updated_at DESC",
-      input.projectId,
+      `SELECT id, title, status, current_revision_id, updated_at, archived_at, archived_from_status
+       FROM task_trees
+       WHERE project_id = ? AND (? = 1 OR status <> 'archived')
+       ORDER BY updated_at DESC, id DESC`,
+      input.projectId, input.includeArchived ? 1 : 0,
     );
+    const selectedTreeId = this.selectedTreeId(input.projectId);
     const query = input.query?.trim().toLowerCase();
-    return trees.flatMap((tree) => {
+    const candidates = trees.flatMap((tree) => {
       const matchedBy: string[] = [];
       if (!query) matchedBy.push("recent");
       if (query && tree.id.toLowerCase() === query) matchedBy.push("tree_id");
@@ -67,8 +74,12 @@ export class TaskTreeService {
         ? this.database.get("SELECT id FROM artifacts WHERE tree_id = ? AND lower(locator) LIKE ? LIMIT 1", tree.id, `%${query}%`)
         : undefined;
       if (artifactMatch) matchedBy.push("artifact");
-      return matchedBy.length ? [{ treeId: tree.id, title: tree.title, status: tree.status, matchedBy, updatedAt: tree.updated_at }] : [];
+      return matchedBy.length ? [{
+        treeId: tree.id, title: tree.title, status: tree.status, matchedBy, updatedAt: tree.updated_at,
+        archivedAt: tree.archived_at, selected: selectedTreeId === tree.id,
+      }] : [];
     });
+    return candidates.slice(0, query || candidates.length > 5 ? 3 : candidates.length);
   }
 
   async createTaskRoot(input: { projectId: string; title: string }): Promise<TaskTreeRevisionView> {
@@ -83,6 +94,12 @@ export class TaskTreeService {
       relations: [], artifacts: [],
     };
     this.database.transaction(() => {
+      const previousSelectedTreeId = this.selectedTreeId(input.projectId);
+      if (previousSelectedTreeId) this.assertNoActiveAttempt(input.projectId, previousSelectedTreeId);
+      this.database.run(
+        "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND active = 1",
+        timestamp, input.projectId,
+      );
       this.database.run(
         "INSERT INTO task_trees (id, project_id, title, status, current_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         treeId, input.projectId, input.title.trim(), "draft", revisionId, timestamp, timestamp,
@@ -98,13 +115,18 @@ export class TaskTreeService {
         input.projectId, treeId, revisionId, nodeId, timestamp,
       );
       this.database.run("INSERT INTO workflow_states (id, project_id, tree_id, stage, revision, active, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)", newId(), input.projectId, treeId, "draft_task_tree", 1, timestamp);
-      this.database.run("INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at) VALUES (?, ?, ?, '{}', ?)", input.projectId, treeId, nodeId, timestamp);
+      this.upsertRuntimeSelection(input.projectId, treeId, nodeId, timestamp);
+      this.appendCollectionTransition({
+        projectId: input.projectId, treeId, action: "selected", fromStatus: "draft", toStatus: "draft",
+        previousSelectedTreeId, selectedTreeId: treeId, timestamp,
+      });
     });
     return { treeId, revisionId, revision: 1, title: input.title.trim(), status: "draft", document };
   }
 
   saveDraftRevision(input: { projectId: string; treeId: string; baseRevisionId: string; document: TaskTreeDocument }): TaskTreeRevisionView {
     const tree = this.requireTree(input.projectId, input.treeId);
+    this.assertTreeMutable(tree);
     if (tree.current_revision_id !== input.baseRevisionId) throw new HarnessError("revision_conflict", "the Task Tree changed after this draft was based on it");
     this.assertValidDocument(input.document);
     return this.persistRevision(tree, input.projectId, input.document);
@@ -130,6 +152,7 @@ export class TaskTreeService {
     decisionSummary: string;
   }): TaskTreeRevisionView {
     const tree = this.requireTree(input.projectId, input.treeId);
+    this.assertTreeMutable(tree);
     if (tree.current_revision_id !== input.baseRevisionId) throw new HarnessError("revision_conflict", "the Draft Change Set has a stale base revision");
     if (input.operations.length !== 1 || input.operations[0]?.op !== "replace_document" || !input.decisionSummary.trim()) {
       throw new HarnessError("invalid_input", "a documented replace_document operation is required");
@@ -151,6 +174,7 @@ export class TaskTreeService {
     proposedDocument: TaskTreeDocument;
   }) {
     const tree = this.requireTree(input.projectId, input.treeId);
+    this.assertTreeMutable(tree);
     if (tree.current_revision_id !== input.baseRevisionId) {
       throw new HarnessError("revision_conflict", "the refinement preview has a stale base revision");
     }
@@ -182,6 +206,7 @@ export class TaskTreeService {
   applyRefinementChangeSet(input: RefinementChangeSetInput): TaskTreeRevisionView {
     return this.database.transaction(() => {
       const tree = this.requireTree(input.projectId, input.treeId);
+      this.assertTreeMutable(tree);
       if (tree.current_revision_id !== input.baseRevisionId) {
         throw new HarnessError("revision_conflict", "the refinement Change Set has a stale base revision");
       }
@@ -281,6 +306,7 @@ export class TaskTreeService {
 
   scanPlanReadiness(input: { projectId: string; treeId: string; scopeRootNodeId?: string }) {
     const tree = this.requireTree(input.projectId, input.treeId);
+    this.assertTreeMutable(tree);
     const revision = this.requireRevision(tree.current_revision_id);
     const document = JSON.parse(revision.document_json) as TaskTreeDocument;
     const coveredNodeIds = resolveConfirmationScope(document, input.scopeRootNodeId);
@@ -318,6 +344,105 @@ export class TaskTreeService {
     const tree = this.requireTree(projectId, treeId);
     const revision = this.requireRevision(tree.current_revision_id);
     return { treeId, revisionId: revision.id, revision: revision.revision, title: tree.title, status: tree.status, document: JSON.parse(revision.document_json) as TaskTreeDocument };
+  }
+
+  selectTaskTree(input: { projectId: string; treeId: string }) {
+    return this.database.transaction(() => {
+      const tree = this.requireTree(input.projectId, input.treeId);
+      if (tree.status === "archived") {
+        throw new HarnessError("task_tree_transition_rejected", "an archived Task Tree must be restored before it can be selected");
+      }
+      const previousSelectedTreeId = this.selectedTreeId(input.projectId);
+      if (previousSelectedTreeId === tree.id) {
+        return {
+          treeId: tree.id, title: tree.title, status: tree.status, selected: true,
+          previousSelectedTreeId, selectedTreeId: tree.id, transitionId: null,
+        };
+      }
+      if (previousSelectedTreeId) this.assertNoActiveAttempt(input.projectId, previousSelectedTreeId);
+      const timestamp = nowIso();
+      const rootNodeId = this.database.get<{ id: string }>(
+        "SELECT id FROM task_nodes WHERE tree_id = ? AND parent_id IS NULL ORDER BY id LIMIT 1", tree.id,
+      )?.id ?? null;
+      this.database.run(
+        "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND active = 1",
+        timestamp, input.projectId,
+      );
+      const workflow = this.database.get<{ id: string }>(
+        "SELECT id FROM workflow_states WHERE project_id = ? AND tree_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+        input.projectId, tree.id,
+      );
+      if (!workflow) throw new HarnessError("task_tree_transition_rejected", "Task Tree has no resumable workflow state");
+      this.database.run("UPDATE workflow_states SET active = 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
+      this.upsertRuntimeSelection(input.projectId, tree.id, rootNodeId, timestamp);
+      this.database.run("UPDATE task_trees SET updated_at = ? WHERE id = ?", timestamp, tree.id);
+      const transitionId = this.appendCollectionTransition({
+        projectId: input.projectId, treeId: tree.id, action: "selected", fromStatus: tree.status,
+        toStatus: tree.status, previousSelectedTreeId, selectedTreeId: tree.id, timestamp,
+      });
+      return {
+        treeId: tree.id, title: tree.title, status: tree.status, selected: true,
+        previousSelectedTreeId, selectedTreeId: tree.id, transitionId,
+      };
+    });
+  }
+
+  archiveTaskTree(input: { projectId: string; treeId: string }) {
+    return this.database.transaction(() => {
+      const tree = this.requireTree(input.projectId, input.treeId);
+      if (tree.status === "archived") {
+        throw new HarnessError("task_tree_transition_rejected", "Task Tree is already archived");
+      }
+      this.assertNoActiveAttempt(input.projectId, tree.id);
+      const previousSelectedTreeId = this.selectedTreeId(input.projectId);
+      const selectedTreeId = previousSelectedTreeId === tree.id ? null : previousSelectedTreeId;
+      const timestamp = nowIso();
+      this.database.run(
+        "UPDATE task_trees SET status = 'archived', archived_at = ?, archived_from_status = ?, updated_at = ? WHERE id = ?",
+        timestamp, tree.status, timestamp, tree.id,
+      );
+      this.database.run(
+        "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND tree_id = ?",
+        timestamp, input.projectId, tree.id,
+      );
+      if (previousSelectedTreeId === tree.id) this.upsertRuntimeSelection(input.projectId, null, null, timestamp);
+      const transitionId = this.appendCollectionTransition({
+        projectId: input.projectId, treeId: tree.id, action: "archived", fromStatus: tree.status,
+        toStatus: "archived", previousSelectedTreeId, selectedTreeId, timestamp,
+      });
+      return {
+        treeId: tree.id, title: tree.title, status: "archived", selected: false,
+        previousSelectedTreeId, selectedTreeId, archivedAt: timestamp, transitionId,
+      };
+    });
+  }
+
+  restoreTaskTree(input: { projectId: string; treeId: string }) {
+    return this.database.transaction(() => {
+      const tree = this.requireTree(input.projectId, input.treeId);
+      if (tree.status !== "archived") {
+        throw new HarnessError("task_tree_transition_rejected", "only an archived Task Tree can be restored");
+      }
+      const restoredStatus = restoredTaskTreeStatus(tree.archived_from_status);
+      const selectedTreeId = this.selectedTreeId(input.projectId);
+      const timestamp = nowIso();
+      this.database.run(
+        "UPDATE task_trees SET status = ?, archived_at = NULL, archived_from_status = NULL, updated_at = ? WHERE id = ?",
+        restoredStatus, timestamp, tree.id,
+      );
+      this.database.run(
+        "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND tree_id = ?",
+        timestamp, input.projectId, tree.id,
+      );
+      const transitionId = this.appendCollectionTransition({
+        projectId: input.projectId, treeId: tree.id, action: "restored", fromStatus: "archived",
+        toStatus: restoredStatus, previousSelectedTreeId: selectedTreeId, selectedTreeId, timestamp,
+      });
+      return {
+        treeId: tree.id, title: tree.title, status: restoredStatus, selected: selectedTreeId === tree.id,
+        previousSelectedTreeId: selectedTreeId, selectedTreeId, archivedAt: null, transitionId,
+      };
+    });
   }
 
   private persistRevision(tree: TreeRow, projectId: string, document: TaskTreeDocument, wrap = true): TaskTreeRevisionView {
@@ -499,7 +624,10 @@ export class TaskTreeService {
   }
 
   private requireTree(projectId: string, treeId: string): TreeRow {
-    const tree = this.database.get<TreeRow>("SELECT id, title, status, current_revision_id, updated_at FROM task_trees WHERE id = ? AND project_id = ?", treeId, projectId);
+    const tree = this.database.get<TreeRow>(
+      "SELECT id, title, status, current_revision_id, updated_at, archived_at, archived_from_status FROM task_trees WHERE id = ? AND project_id = ?",
+      treeId, projectId,
+    );
     if (!tree) throw new HarnessError("not_found", "Task Tree was not found in the current project");
     return tree;
   }
@@ -508,5 +636,64 @@ export class TaskTreeService {
     const revision = this.database.get<RevisionRow>("SELECT id, revision, document_json, created_at FROM task_tree_revisions WHERE id = ?", revisionId);
     if (!revision) throw new HarnessError("not_found", "Task Tree revision was not found");
     return revision;
+  }
+
+  private assertTreeMutable(tree: TreeRow): void {
+    if (tree.status === "archived") {
+      throw new HarnessError("task_tree_transition_rejected", "archived Task Trees are read-only until restored");
+    }
+  }
+
+  private assertNoActiveAttempt(projectId: string, treeId: string): void {
+    const attempt = this.database.get<{ id: string }>(`
+      SELECT id FROM execution_attempts
+      WHERE project_id = ? AND tree_id = ? AND status IN ('running', 'verifying')
+      ORDER BY started_at DESC, id DESC LIMIT 1
+    `, projectId, treeId);
+    if (attempt) {
+      throw new HarnessError(
+        "task_tree_transition_rejected",
+        "complete or abort the active execution Attempt before switching or archiving this Task Tree",
+        { attemptId: attempt.id, treeId },
+      );
+    }
+  }
+
+  private selectedTreeId(projectId: string): string | null {
+    return this.database.get<{ selected_tree_id: string | null }>(
+      "SELECT selected_tree_id FROM runtime_states WHERE project_id = ?", projectId,
+    )?.selected_tree_id ?? null;
+  }
+
+  private upsertRuntimeSelection(projectId: string, treeId: string | null, nodeId: string | null, timestamp: string): void {
+    this.database.run(`
+      INSERT INTO runtime_states (project_id, selected_tree_id, selected_node_id, state_json, updated_at)
+      VALUES (?, ?, ?, '{}', ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        selected_tree_id = excluded.selected_tree_id,
+        selected_node_id = excluded.selected_node_id,
+        updated_at = excluded.updated_at
+    `, projectId, treeId, nodeId, timestamp);
+  }
+
+  private appendCollectionTransition(input: {
+    projectId: string;
+    treeId: string;
+    action: TaskTreeCollectionAction;
+    fromStatus: string | null;
+    toStatus: string;
+    previousSelectedTreeId: string | null;
+    selectedTreeId: string | null;
+    timestamp: string;
+  }): string {
+    const transitionId = newId();
+    this.database.run(`
+      INSERT INTO task_tree_collection_transitions (
+        id, project_id, tree_id, action, from_status, to_status,
+        previous_selected_tree_id, selected_tree_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, transitionId, input.projectId, input.treeId, input.action, input.fromStatus, input.toStatus,
+    input.previousSelectedTreeId, input.selectedTreeId, input.timestamp);
+    return transitionId;
   }
 }

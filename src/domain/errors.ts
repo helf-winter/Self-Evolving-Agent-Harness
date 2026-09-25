@@ -8,6 +8,7 @@ export type HarnessErrorCode =
   | "leaf_contract_invalid"
   | "relation_artifact_required"
   | "workflow_transition_rejected"
+  | "task_tree_transition_rejected"
   | "attempt_already_active"
   | "attempt_not_executable"
   | "attempt_state_conflict"
