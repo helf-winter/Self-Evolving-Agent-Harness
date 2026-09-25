@@ -226,7 +226,7 @@ export function analyzePlanReadiness(document: TaskTreeDocument, scopeRootNodeId
       if (!scope.has(relation.fromNodeId) && !scope.has(relation.toNodeId)) return;
       const kind = normalizeRelationKind(relation.kind);
       const requiresArtifact = ["calls", "exchanges_data_with", "shares_artifact_with"].includes(kind)
-        || (kind === "depends_on" && relation.dependencyKind !== "execution_order")
+        || (kind === "depends_on" && relation.dependencyKind !== undefined && relation.dependencyKind !== "execution_order")
         || (kind === "coordinates_with" && relation.coordinationKind !== "schedule_only");
       if (requiresArtifact
         && (!relation.artifactId || !artifactIds.has(relation.artifactId))) {

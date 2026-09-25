@@ -189,7 +189,7 @@ export function validateTaskTree(document: TaskTreeDocument): ValidationResult {
       errors.push({ code: "invalid_tree_structure", path: `relations[${index}]` });
     }
     const conditionallyRequiresArtifact =
-      (kind === "depends_on" && relation.dependencyKind !== "execution_order") ||
+      (kind === "depends_on" && relation.dependencyKind !== undefined && relation.dependencyKind !== "execution_order") ||
       (kind === "coordinates_with" && relation.coordinationKind !== "schedule_only");
     const requiresArtifact = ["calls", "exchanges_data_with", "shares_artifact_with"].includes(kind) || conditionallyRequiresArtifact;
     const sharedArtifactMissingSide = kind === "shares_artifact_with" && Boolean(relation.artifactId) &&
