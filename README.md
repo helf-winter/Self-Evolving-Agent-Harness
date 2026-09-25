@@ -2,11 +2,12 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop，以及 Trace Execution Context 十二个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context，以及 Task Tree Collection Lifecycle 十三个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
 - Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
+- 一个 Project 可维护多棵 Task Tree；创建或选择时仅激活一套 Workflow，归档可恢复且不删除 revision、Trace 或 Artifact 证据；
 - 允许保存不完整但结构合法的规划草案；按 tree/branch 范围执行确定性 Plan Readiness、问题优先级和语义警告；
 - 局部 refinement 可直接应用，跨分支 refinement 必须先持久化影响预览；成功应用原子绑定用户消息 Trace、Draft Change Set、Decision Record、planning Trace、新 revision 与 Skeleton 投影；
 - 规划、版本绑定的分支确认、Skeleton、实现和验证工作流状态；
@@ -34,7 +35,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Runtime Plugin 使用稳定 ID 和不可变 revision，通过精确 provides/requires contract、固定点依赖协调与 composition state 实现空间组合；
 - Plugin registration 和 Effect 由 revision 生命周期拥有；替换/卸载只接受证据化 disposition，并支持影响闭包、冲突重试、失败恢复和 provider 恢复后的依赖重激活；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
-- Bash CLI、Claude 插件 Skills 和 60 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 63 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -70,6 +71,10 @@ cd /path/to/your-project
 harness project inspect
 harness taskroot '实现健康检查接口'
 harness tree candidates health
+harness tree select TREE_ID
+harness tree archive TREE_ID
+harness tree candidates --include-archived
+harness tree restore TREE_ID
 harness tree snapshot
 ```
 
@@ -91,6 +96,17 @@ harness node evaluate ATTEMPT_ID succeeded
 ```
 
 `evaluate ... succeeded` 只是提出成功结论。Runtime 会核对当前修订、所需证据、依赖节点与子节点状态；条件不完整时会把 Evaluation 记录为 `uncertain`，不会把节点标成成功。
+
+### Task Tree Collection Lifecycle
+
+Task Tree 属于 Project，而不是聊天 Session。一个 Project 可以保留多棵相互独立的 Task Tree，但任意时刻最多只有一棵树被 Runtime 选中并拥有 active Workflow：
+
+- 新建根任务会原子停用原 Workflow 并选择新树；选择旧树不会创建 revision，也不会恢复历史 Attempt；
+- 默认候选查询隐藏 archived 树；`--include-archived` 或 MCP 的 `includeArchived: true` 仅用于明确查看归档历史；
+- 归档只写入状态、原状态和不可变 collection transition，不删除 Task Tree revision、Trace、Artifact 或 Evaluation；
+- 恢复会回到归档前状态，但不会自动选择、执行或重新激活 Workflow；
+- 当前树存在 `running` 或 `verifying` Attempt 时，切换、新建或归档会被拒绝，必须先完成或中止该 Attempt；
+- CLI 的 `tree select/archive/restore` 与 MCP 的 `harness_select_task_tree`、`harness_archive_task_tree`、`harness_restore_task_tree` 使用同一事务化服务逻辑，并始终按当前目录绑定的 Project 隔离。
 
 ### Project Identity 与 Clone
 

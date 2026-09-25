@@ -217,14 +217,33 @@ npm test -- --run tests/unit/task-refinement.test.ts tests/integration/task-tree
 npm test -- --run tests/integration/hook-ingestion.test.ts tests/integration/runtime-query.test.ts tests/e2e/trace-execution-context.test.ts tests/plugin/mcp.test.ts tests/plugin/plugin-contract.test.ts
 ```
 
-## 13. 安全检查
+## 13. Task Tree Collection Lifecycle
+
+在同一个 Project 中通过 CLI 或 Claude MCP 创建两棵 Task Tree：
+
+1. 确认第二棵树创建后成为 `selectedTreeId`，第一棵树的 Workflow 变为 inactive，且数据库中始终只有一个 active Workflow。
+2. 选择第一棵树；确认没有产生新的 Task Tree revision，也没有恢复任何历史 Attempt。
+3. 在第一棵树建立 `running` Attempt；确认选择第二棵树、创建第三棵树或归档第一棵树均返回 `task_tree_transition_rejected`，Runtime selection 和 Workflow 投影保持不变。
+4. 完成或中止 Attempt 后归档第一棵树；确认默认 candidates 不再返回它，使用 `--include-archived` 或 `includeArchived: true` 可以明确查询。
+5. 确认归档树仍可读取历史 revision 与 Trace，但保存草稿、应用 refinement、扫描 readiness 或选择执行均被拒绝。
+6. 重启 Runtime 后恢复第一棵树；确认恢复到归档前状态，但当前选择仍是第二棵树，第一棵树 Workflow 保持 inactive。
+7. 确认归档前的 revision、Trace、Artifact 和 collection transition 数量与内容没有被重写或删除。
+8. 使用另一个 Project 的 tree ID 执行选择、归档或恢复；必须返回 `not_found`，不得泄漏候选或修改状态。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/task-tree-service.test.ts tests/integration/cli.test.ts tests/e2e/task-tree-collection-lifecycle.test.ts tests/plugin/mcp.test.ts
+```
+
+## 14. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 14. 当前不作为验收失败的范围
+## 15. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
