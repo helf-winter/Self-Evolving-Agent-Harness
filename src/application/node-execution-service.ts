@@ -90,6 +90,9 @@ export class NodeExecutionService {
         throw new HarnessError("attempt_not_executable", `Task Node phase ${body.executionPhase ?? "undefined"} is not allowed during ${node.workflow_stage}`);
       }
       this.requireSucceededDependencies(node.tree_id, body.dependencies ?? []);
+      if (body.executionPhase === "verification") {
+        this.requireSucceededCurrentChildren(node.tree_id, node.node_id);
+      }
       const attemptNumber = (this.database.get<{ maximum: number | null }>(
         "SELECT MAX(attempt_number) AS maximum FROM execution_attempts WHERE task_node_revision_id = ?",
         node.node_revision_id,
@@ -181,6 +184,24 @@ export class NodeExecutionService {
       if (dependency?.status !== "succeeded") {
         throw new HarnessError("attempt_not_executable", `dependency ${dependencyId} has not succeeded`);
       }
+    }
+  }
+
+  private requireSucceededCurrentChildren(treeId: string, parentNodeId: string): void {
+    const incompleteChild = this.database.get<{ id: string; status: string }>(`
+      SELECT n.id, n.status
+      FROM task_nodes n
+      JOIN task_trees t ON t.id = n.tree_id
+      JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = t.current_revision_id
+      WHERE n.tree_id = ? AND n.parent_id = ? AND n.status <> 'succeeded'
+      ORDER BY n.id LIMIT 1
+    `, treeId, parentNodeId);
+    if (incompleteChild) {
+      throw new HarnessError(
+        "attempt_not_executable",
+        `child ${incompleteChild.id} has not succeeded and parent verification cannot start`,
+        { childNodeId: incompleteChild.id, childStatus: incompleteChild.status },
+      );
     }
   }
 

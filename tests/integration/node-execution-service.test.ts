@@ -65,6 +65,43 @@ describe("NodeExecutionService", () => {
     database.close();
   });
 
+  it("blocks a parent verification Attempt until every current direct child succeeds", async () => {
+    const { database, service } = await fixture();
+    database.run("UPDATE task_nodes SET status = 'ready' WHERE id = 'dep'");
+    database.run("UPDATE task_nodes SET status = 'failed' WHERE id = 'n1'");
+    database.run("UPDATE task_node_revisions SET body_json = ? WHERE id = 'dep-r1'", JSON.stringify({
+      id: "dep", parentId: null, children: ["n1"], executionPhase: "verification", dependencies: [],
+      requiredEvidence: [{ key: "integration", description: "integration tests pass" }],
+    }));
+    database.run("UPDATE workflow_states SET stage = 'root_verification' WHERE id = 'w1'");
+
+    expect(() => service.startAttempt({ projectId: "p1", nodeId: "dep", expectedTreeRevisionId: "tr1" }))
+      .toThrow(expect.objectContaining({ code: "attempt_not_executable", message: expect.stringContaining("child n1") }));
+    expect(database.all("SELECT id FROM execution_attempts WHERE task_node_id = 'dep'")).toEqual([]);
+    expect(database.get<{ status: string }>("SELECT status FROM task_nodes WHERE id = 'dep'"))
+      .toEqual({ status: "ready" });
+
+    database.run("UPDATE task_nodes SET status = 'succeeded' WHERE id = 'n1'");
+    expect(service.startAttempt({ projectId: "p1", nodeId: "dep", expectedTreeRevisionId: "tr1" }))
+      .toMatchObject({ nodeId: "dep", status: "running", attemptNumber: 1 });
+    database.close();
+  });
+
+  it("does not apply the child-success verification gate to skeleton work", async () => {
+    const { database, service } = await fixture();
+    database.run("UPDATE task_nodes SET status = 'ready' WHERE id = 'dep'");
+    database.run("UPDATE task_nodes SET status = 'failed' WHERE id = 'n1'");
+    database.run("UPDATE task_node_revisions SET body_json = ? WHERE id = 'dep-r1'", JSON.stringify({
+      id: "dep", parentId: null, children: ["n1"], executionPhase: "skeleton", dependencies: [],
+      requiredEvidence: [{ key: "skeleton", description: "skeleton compiles" }],
+    }));
+    database.run("UPDATE workflow_states SET stage = 'skeleton_pass' WHERE id = 'w1'");
+
+    expect(service.startAttempt({ projectId: "p1", nodeId: "dep", expectedTreeRevisionId: "tr1" }))
+      .toMatchObject({ nodeId: "dep", status: "running" });
+    database.close();
+  });
+
   it("links only declared, same-scope, post-start Trace evidence", async () => {
     const { database, service } = await fixture();
     const attempt = service.startAttempt({ projectId: "p1", nodeId: "n1", expectedTreeRevisionId: "tr1" });
