@@ -119,6 +119,25 @@ describe("TaskTreeService", () => {
     database.close();
   });
 
+  it("persists historical relation aliases with the canonical vocabulary", async () => {
+    const { database, service } = await fixture();
+    const root = await service.createTaskRoot({ projectId: "p1", title: "Runtime" });
+    const draft = service.saveDraftRevision({
+      projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId,
+      document: {
+        ...validDocument,
+        relations: [{ fromNodeId: "root", toNodeId: "leaf", kind: "data_exchange", artifactId: "a1" }],
+      },
+    });
+    expect(draft.document.relations[0]?.kind).toBe("exchanges_data_with");
+    expect(JSON.parse(database.get<{ document_json: string }>(
+      "SELECT document_json FROM task_tree_revisions WHERE id = ?", draft.revisionId,
+    )!.document_json).relations[0].kind).toBe("exchanges_data_with");
+    expect(database.get<{ kind: string }>("SELECT kind FROM task_relation_edges WHERE tree_revision_id = ?", draft.revisionId))
+      .toEqual({ kind: "exchanges_data_with" });
+    database.close();
+  });
+
   it("keeps multiple roots while selecting only the newest tree and limiting deterministic candidates", async () => {
     const { database, service } = await fixture();
     const roots = [];

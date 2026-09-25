@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "./trace.js";
 import {
+  normalizeRelationKind,
   validateTaskTree,
   type SkeletonAcceptanceInput,
   type TaskTreeDocument,
@@ -223,7 +224,11 @@ export function analyzePlanReadiness(document: TaskTreeDocument, scopeRootNodeId
     const artifactIds = new Set(document.artifacts.map((artifact) => artifact.id));
     document.relations.forEach((relation, index) => {
       if (!scope.has(relation.fromNodeId) && !scope.has(relation.toNodeId)) return;
-      if (["calls", "data_exchange", "shares_contract"].includes(relation.kind)
+      const kind = normalizeRelationKind(relation.kind);
+      const requiresArtifact = ["calls", "exchanges_data_with", "shares_artifact_with"].includes(kind)
+        || (kind === "depends_on" && relation.dependencyKind !== "execution_order")
+        || (kind === "coordinates_with" && relation.coordinationKind !== "schedule_only");
+      if (requiresArtifact
         && (!relation.artifactId || !artifactIds.has(relation.artifactId))) {
         blockingIssues.push(issue({
           code: "relation_contract_missing", category: "cross_branch_contract", severity: "blocking",

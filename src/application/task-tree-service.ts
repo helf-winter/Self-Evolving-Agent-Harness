@@ -3,7 +3,7 @@ import { deriveConfirmationStates, resolveConfirmationScope, type ConfirmationSt
 import { normalizeArtifactInput } from "../domain/artifact-graph.js";
 import { newId, nowIso } from "../domain/ids.js";
 import { canonicalJson } from "../domain/trace.js";
-import { validateTaskTree, type TaskTreeDocument } from "../domain/task-tree.js";
+import { normalizeTaskTreeDocument, validateTaskTree, type TaskTreeDocument } from "../domain/task-tree.js";
 import { analyzeDraftImpact, analyzePlanReadiness, validateDraftStructure } from "../domain/task-refinement.js";
 import { restoredTaskTreeStatus, type TaskTreeCollectionAction } from "../domain/task-collection.js";
 import type { RuntimeDatabase } from "../storage/database.js";
@@ -446,6 +446,7 @@ export class TaskTreeService {
   }
 
   private persistRevision(tree: TreeRow, projectId: string, document: TaskTreeDocument, wrap = true): TaskTreeRevisionView {
+    document = normalizeTaskTreeDocument(document);
     const current = this.requireRevision(tree.current_revision_id);
     const revisionId = newId();
     const revision = current.revision + 1;

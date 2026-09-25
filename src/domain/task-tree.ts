@@ -2,7 +2,11 @@ import type { ArtifactInput } from "./artifact.js";
 import { normalizeArtifactInput, type ArtifactContractInput, type ArtifactRelationInput, type TaskArtifactLinkInput } from "./artifact-graph.js";
 
 export type ExecutionPhase = "skeleton" | "implementation" | "verification";
-export type RelationKind = "depends_on" | "calls" | "data_exchange" | "shares_contract";
+export type CanonicalRelationKind = "depends_on" | "calls" | "exchanges_data_with" | "shares_artifact_with" | "coordinates_with";
+export type LegacyRelationKind = "data_exchange" | "shares_contract";
+export type RelationKind = CanonicalRelationKind | LegacyRelationKind;
+export type DependencyKind = "execution_order" | "contract_ready" | "test_fixture_ready" | "environment_ready";
+export type CoordinationKind = "schedule_only" | "review_sync" | "shared_decision" | "integration_check";
 
 export interface RequiredEvidence {
   key: string;
@@ -30,6 +34,9 @@ export interface TaskRelationInput {
   toNodeId: string;
   kind: RelationKind;
   artifactId?: string;
+  dependencyKind?: DependencyKind;
+  coordinationKind?: CoordinationKind;
+  description?: string;
 }
 
 export interface PlannedEffectInput {
@@ -78,6 +85,19 @@ export interface ValidationError {
 export interface ValidationResult {
   ok: boolean;
   errors: ValidationError[];
+}
+
+export function normalizeRelationKind(kind: RelationKind): CanonicalRelationKind {
+  if (kind === "data_exchange") return "exchanges_data_with";
+  if (kind === "shares_contract") return "shares_artifact_with";
+  return kind;
+}
+
+export function normalizeTaskTreeDocument(document: TaskTreeDocument): TaskTreeDocument {
+  return {
+    ...document,
+    relations: document.relations.map((relation) => ({ ...relation, kind: normalizeRelationKind(relation.kind) })),
+  };
 }
 
 function validateLeaf(node: TaskNodeInput): ValidationError[] {
@@ -162,11 +182,20 @@ export function validateTaskTree(document: TaskTreeDocument): ValidationResult {
     contractIds.add(contract.id);
     if (invalid) errors.push({ code: "artifact_contract_invalid", path: `artifactContracts[${index}]` });
   });
+  const artifactLinks = new Set((document.artifactLinks ?? []).map((link) => `${link.taskNodeId}\u0000${link.artifactId}`));
   document.relations.forEach((relation, index) => {
+    const kind = normalizeRelationKind(relation.kind);
     if (!ids.has(relation.fromNodeId) || !ids.has(relation.toNodeId)) {
       errors.push({ code: "invalid_tree_structure", path: `relations[${index}]` });
     }
-    if (["calls", "data_exchange", "shares_contract"].includes(relation.kind) && (!relation.artifactId || !artifacts.has(relation.artifactId))) {
+    const conditionallyRequiresArtifact =
+      (kind === "depends_on" && relation.dependencyKind !== "execution_order") ||
+      (kind === "coordinates_with" && relation.coordinationKind !== "schedule_only");
+    const requiresArtifact = ["calls", "exchanges_data_with", "shares_artifact_with"].includes(kind) || conditionallyRequiresArtifact;
+    const sharedArtifactMissingSide = kind === "shares_artifact_with" && Boolean(relation.artifactId) &&
+      (!artifactLinks.has(`${relation.fromNodeId}\u0000${relation.artifactId}`) ||
+       !artifactLinks.has(`${relation.toNodeId}\u0000${relation.artifactId}`));
+    if ((requiresArtifact && (!relation.artifactId || !artifacts.has(relation.artifactId))) || sharedArtifactMissingSide) {
       errors.push({ code: "relation_artifact_required", path: `relations[${index}].artifactId` });
     }
   });
