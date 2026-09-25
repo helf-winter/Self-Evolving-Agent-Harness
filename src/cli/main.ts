@@ -11,7 +11,7 @@ function option(args: string[], name: string): string | undefined {
 function positional(args: string[]): string[] {
   const result: string[] = [];
   for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--json") continue;
+    if (["--json", "--include-archived"].includes(args[index]!)) continue;
     if ([
       "--cwd", "--limit", "--cursor", "--status",
       "--map-limit", "--map-cursor", "--evidence-limit", "--evidence-cursor",
@@ -82,7 +82,19 @@ export async function runCli(args = process.argv.slice(2)): Promise<number> {
     } else if (words[0] === "tree" && words[1] === "candidates") {
       const project = await requireProject(runtime, cwd);
       const query = words.slice(2).join(" ");
-      result = runtime.taskTrees.listTaskTreeCandidates({ projectId: project.projectId, ...(query ? { query } : {}) });
+      result = runtime.taskTrees.listTaskTreeCandidates({
+        projectId: project.projectId, ...(query ? { query } : {}),
+        ...(args.includes("--include-archived") ? { includeArchived: true } : {}),
+      });
+    } else if (words[0] === "tree" && words[1] === "select") {
+      const project = await requireProject(runtime, cwd);
+      result = runtime.taskTrees.selectTaskTree({ projectId: project.projectId, treeId: words[2] ?? "" });
+    } else if (words[0] === "tree" && words[1] === "archive") {
+      const project = await requireProject(runtime, cwd);
+      result = runtime.taskTrees.archiveTaskTree({ projectId: project.projectId, treeId: words[2] ?? "" });
+    } else if (words[0] === "tree" && words[1] === "restore") {
+      const project = await requireProject(runtime, cwd);
+      result = runtime.taskTrees.restoreTaskTree({ projectId: project.projectId, treeId: words[2] ?? "" });
     } else if (words[0] === "tree" && words[1] === "snapshot") {
       const project = await requireProject(runtime, cwd);
       result = runtime.queries.getRuntimeSnapshot(project.projectId);

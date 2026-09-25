@@ -216,8 +216,32 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
 
   server.registerTool("harness_list_task_tree_candidates", {
     description: "List deterministic Task Tree candidates scoped to the current project.",
-    inputSchema: { cwd: cwdSchema, query: z.string().optional() },
-  }, ({ cwd, query }) => guarded(async () => runtime.taskTrees.listTaskTreeCandidates({ projectId: (await existingProject(cwd)).projectId, ...(query ? { query } : {}) })));
+    inputSchema: { cwd: cwdSchema, query: z.string().optional(), includeArchived: z.boolean().optional() },
+  }, ({ cwd, query, includeArchived }) => guarded(async () => runtime.taskTrees.listTaskTreeCandidates({
+    projectId: (await existingProject(cwd)).projectId,
+    ...(query ? { query } : {}), ...(includeArchived ? { includeArchived: true } : {}),
+  })));
+
+  server.registerTool("harness_select_task_tree", {
+    description: "Select and resume one non-archived Task Tree in the current Project; active Attempts prevent switching.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1) },
+  }, ({ cwd, treeId }) => guarded(async () => runtime.taskTrees.selectTaskTree({
+    projectId: (await existingProject(cwd)).projectId, treeId,
+  })));
+
+  server.registerTool("harness_archive_task_tree", {
+    description: "Reversibly archive one Task Tree without deleting revisions or Trace evidence.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1) },
+  }, ({ cwd, treeId }) => guarded(async () => runtime.taskTrees.archiveTaskTree({
+    projectId: (await existingProject(cwd)).projectId, treeId,
+  })));
+
+  server.registerTool("harness_restore_task_tree", {
+    description: "Restore an archived Task Tree to its prior status without selecting or executing it.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1) },
+  }, ({ cwd, treeId }) => guarded(async () => runtime.taskTrees.restoreTaskTree({
+    projectId: (await existingProject(cwd)).projectId, treeId,
+  })));
 
   server.registerTool("harness_create_task_root", {
     description: "Create an explicit Task Tree root for the current project.",

@@ -40,6 +40,28 @@ describe("harness CLI", () => {
     expect(JSON.parse(candidates.stdout)).toHaveLength(1);
   });
 
+  it("selects, archives, restores, and explicitly lists archived Task Trees", async () => {
+    const cwd = await mkdtemp(path.join(tmpdir(), "harness-cli-")); dirs.push(cwd);
+    const first = JSON.parse(run(cwd, ["taskroot", "First", "--json"]).stdout) as { treeId: string };
+    const second = JSON.parse(run(cwd, ["taskroot", "Second", "--json"]).stdout) as { treeId: string };
+
+    const selected = run(cwd, ["tree", "select", first.treeId, "--json"]);
+    expect(selected.status, selected.stderr).toBe(0);
+    expect(JSON.parse(selected.stdout)).toMatchObject({ treeId: first.treeId, previousSelectedTreeId: second.treeId });
+    const archived = run(cwd, ["tree", "archive", second.treeId, "--json"]);
+    expect(archived.status, archived.stderr).toBe(0);
+    expect(JSON.parse(archived.stdout)).toMatchObject({ treeId: second.treeId, status: "archived", selectedTreeId: first.treeId });
+    expect(JSON.parse(run(cwd, ["tree", "candidates", "--json"]).stdout)).toHaveLength(1);
+    expect(JSON.parse(run(cwd, ["tree", "candidates", "--include-archived", "--json"]).stdout))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ treeId: second.treeId, status: "archived" })]));
+
+    const restored = run(cwd, ["tree", "restore", second.treeId, "--json"]);
+    expect(restored.status, restored.stderr).toBe(0);
+    expect(JSON.parse(restored.stdout)).toMatchObject({ treeId: second.treeId, status: "draft", selected: false });
+    expect(run(cwd, ["tree", "select", second.treeId, "--json"]).status).toBe(0);
+    expect(JSON.parse(run(cwd, ["tree", "snapshot", "--json"]).stdout)).toMatchObject({ selectedTreeId: second.treeId });
+  });
+
   it("uses a stable non-zero exit with structured errors", async () => {
     const cwd = await mkdtemp(path.join(tmpdir(), "harness-cli-")); dirs.push(cwd);
     const result = run(cwd, ["tree", "summary", "missing", "--json"]);

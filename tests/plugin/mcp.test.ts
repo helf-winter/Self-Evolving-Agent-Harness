@@ -24,6 +24,7 @@ describe("Harness MCP binding", () => {
       "harness_apply_draft_change_set", "harness_confirm_scope", "harness_create_confirmation_prompt",
       "harness_create_task_root", "harness_get_runtime_snapshot", "harness_get_task_node_detail",
       "harness_get_task_tree_summary", "harness_get_trace_events", "harness_list_task_tree_candidates",
+      "harness_select_task_tree", "harness_archive_task_tree", "harness_restore_task_tree",
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
       "harness_get_artifact_graph", "harness_get_artifact_detail", "harness_get_plan_drift_summary",
@@ -48,6 +49,9 @@ describe("Harness MCP binding", () => {
     ].sort());
     expect(tools.find((tool) => tool.name === "harness_scan_plan_readiness")?.inputSchema).toMatchObject({
       properties: { scopeRootNodeId: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_list_task_tree_candidates")?.inputSchema).toMatchObject({
+      properties: { includeArchived: { type: "boolean" } },
     });
     expect(tools.find((tool) => tool.name === "harness_apply_draft_change_set")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["sourceUserMessageTraceEventId", "decision"]),
@@ -93,6 +97,23 @@ describe("Harness MCP binding", () => {
     expect(created.isError).not.toBe(true);
     const createdContent = (created as { content: Array<{ type: string; text?: string }> }).content;
     const createdValue = JSON.parse(createdContent[0]?.type === "text" ? createdContent[0].text ?? "null" : "null") as { treeId: string };
+    const second = await client.callTool({ name: "harness_create_task_root", arguments: { cwd: project, title: "Second tree" } });
+    const secondContent = (second as { content: Array<{ type: string; text?: string }> }).content;
+    const secondValue = JSON.parse(secondContent[0]?.type === "text" ? secondContent[0].text ?? "null" : "null") as { treeId: string };
+    expect((await client.callTool({ name: "harness_select_task_tree", arguments: { cwd: project, treeId: createdValue.treeId } })).isError).not.toBe(true);
+    expect((await client.callTool({ name: "harness_archive_task_tree", arguments: { cwd: project, treeId: secondValue.treeId } })).isError).not.toBe(true);
+    const archivedSelection = await client.callTool({ name: "harness_select_task_tree", arguments: { cwd: project, treeId: secondValue.treeId } });
+    expect(archivedSelection.isError).toBe(true);
+    const archivedErrorContent = (archivedSelection as { content: Array<{ type: string; text?: string }> }).content;
+    expect(JSON.parse(archivedErrorContent[0]?.type === "text" ? archivedErrorContent[0].text ?? "null" : "null"))
+      .toMatchObject({ error: { code: "task_tree_transition_rejected" } });
+    const archivedCandidates = await client.callTool({
+      name: "harness_list_task_tree_candidates", arguments: { cwd: project, includeArchived: true },
+    });
+    const archivedCandidateContent = (archivedCandidates as { content: Array<{ type: string; text?: string }> }).content;
+    expect(JSON.parse(archivedCandidateContent[0]?.type === "text" ? archivedCandidateContent[0].text ?? "null" : "null"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ treeId: secondValue.treeId, status: "archived" })]));
+    expect((await client.callTool({ name: "harness_restore_task_tree", arguments: { cwd: project, treeId: secondValue.treeId } })).isError).not.toBe(true);
     const recorded = await client.callTool({
       name: "harness_record_plan_drift",
       arguments: {
