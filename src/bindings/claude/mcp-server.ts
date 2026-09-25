@@ -329,11 +329,13 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
       cwd: cwdSchema, nodeId: z.string(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional(),
       attemptLimit: z.number().int().min(1).max(200).optional(), attemptCursor: z.string().optional(),
       evaluationLimit: z.number().int().min(1).max(200).optional(), evaluationCursor: z.string().optional(),
+      childLimit: z.number().int().min(1).max(200).optional(), childCursor: z.string().optional(),
     },
-  }, ({ cwd, nodeId, limit, cursor, attemptLimit, attemptCursor, evaluationLimit, evaluationCursor }) => guarded(async () => runtime.queries.getTaskNodeDetail((await existingProject(cwd)).projectId, nodeId, {
+  }, ({ cwd, nodeId, limit, cursor, attemptLimit, attemptCursor, evaluationLimit, evaluationCursor, childLimit, childCursor }) => guarded(async () => runtime.queries.getTaskNodeDetail((await existingProject(cwd)).projectId, nodeId, {
     ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
     ...(attemptLimit ? { attemptLimit } : {}), ...(attemptCursor ? { attemptCursor } : {}),
     ...(evaluationLimit ? { evaluationLimit } : {}), ...(evaluationCursor ? { evaluationCursor } : {}),
+    ...(childLimit ? { childLimit } : {}), ...(childCursor ? { childCursor } : {}),
   })));
 
   server.registerTool("harness_get_trace_events", {

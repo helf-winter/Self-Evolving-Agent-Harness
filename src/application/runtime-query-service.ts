@@ -171,6 +171,8 @@ export class RuntimeQueryService {
     attemptCursor?: string;
     evaluationLimit?: number;
     evaluationCursor?: string;
+    childLimit?: number;
+    childCursor?: string;
   }) {
     const row = this.database.get<{ tree_id: string; status: string; body_json: string; confirmation_state: string }>(
       `SELECT n.tree_id, n.status, nr.body_json, cs.state AS confirmation_state FROM task_nodes n
@@ -222,6 +224,7 @@ export class RuntimeQueryService {
       riskSummary: evaluation.risk_summary || null,
       createdAt: evaluation.created_at,
     }));
+    const childProjection = this.getChildTaskReports(projectId, row.tree_id, nodeId, options);
     return {
       treeId: row.tree_id,
       status: row.status,
@@ -233,6 +236,109 @@ export class RuntimeQueryService {
       evaluationNextCursor: evaluationRows.length > evaluationLimit ? encodeCursor(evaluationOffset + evaluationLimit) : null,
       evidence: evidence.items,
       nextCursor: evidence.nextCursor,
+      ...childProjection,
+    };
+  }
+
+  private getChildTaskReports(projectId: string, treeId: string, parentNodeId: string, options: {
+    childLimit?: number;
+    childCursor?: string;
+  }) {
+    const currentRevision = this.database.get<{ current_revision_id: string }>(
+      "SELECT current_revision_id FROM task_trees WHERE id = ? AND project_id = ?", treeId, projectId,
+    );
+    if (!currentRevision) throw new HarnessError("not_found", "Task Tree was not found in the current project");
+    const childLimit = Math.min(Math.max(options.childLimit ?? 50, 1), 200);
+    const childOffset = decodeCursor(options.childCursor);
+    const childRows = this.database.all<{
+      id: string; title: string; status: string; node_revision_id: string; body_json: string; confirmation_state: string;
+    }>(`
+      SELECT n.id, n.title, n.status, nr.id AS node_revision_id, nr.body_json,
+             COALESCE(cs.state, 'draft') AS confirmation_state
+      FROM task_nodes n
+      JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = ?
+      LEFT JOIN task_node_confirmation_states cs ON cs.task_node_id = n.id AND cs.tree_revision_id = ?
+      WHERE n.tree_id = ? AND n.parent_id = ?
+      ORDER BY n.title, n.id LIMIT ? OFFSET ?
+    `, currentRevision.current_revision_id, currentRevision.current_revision_id, treeId, parentNodeId,
+    childLimit + 1, childOffset);
+    const reports = childRows.slice(0, childLimit).map((child) => {
+      const body = JSON.parse(child.body_json) as TaskNodeInput;
+      const attempt = this.database.get<{
+        id: string; attempt_number: number; status: string; started_at: string; completed_at: string | null;
+      }>(`
+        SELECT id, attempt_number, status, started_at, completed_at
+        FROM execution_attempts
+        WHERE project_id = ? AND task_node_id = ? AND task_node_revision_id = ?
+        ORDER BY attempt_number DESC LIMIT 1
+      `, projectId, child.id, child.node_revision_id);
+      const evaluation = this.database.get<{
+        id: string; execution_attempt_id: string; verdict: string; covered_required_evidence_json: string;
+        missing_required_evidence_json: string; created_at: string; applied: number | null;
+        target_status: string | null; rejection_code: string | null;
+      }>(`
+        SELECT e.id, e.execution_attempt_id, e.verdict, e.covered_required_evidence_json,
+               e.missing_required_evidence_json, e.created_at, l.applied, l.target_status, l.rejection_code
+        FROM evaluations e
+        LEFT JOIN lifecycle_transition_records l ON l.evaluation_id = e.id
+        WHERE e.project_id = ? AND e.task_node_id = ? AND e.task_node_revision_id = ?
+        ORDER BY e.created_at DESC, e.id DESC LIMIT 1
+      `, projectId, child.id, child.node_revision_id);
+      const artifactCounts = this.database.get<{ total: number; planned: number; actual: number }>(`
+        SELECT count(*) AS total,
+               COALESCE(sum(CASE WHEN a.confidence = 'planned' THEN 1 ELSE 0 END), 0) AS planned,
+               COALESCE(sum(CASE WHEN a.confidence <> 'planned' THEN 1 ELSE 0 END), 0) AS actual
+        FROM task_node_artifact_links l
+        JOIN artifacts a ON a.id = l.artifact_id AND a.project_id = l.project_id
+        WHERE l.project_id = ? AND l.tree_id = ? AND l.tree_revision_id = ? AND l.task_node_id = ?
+      `, projectId, treeId, currentRevision.current_revision_id, child.id) ?? { total: 0, planned: 0, actual: 0 };
+      const traceCount = this.database.get<{ count: number }>(
+        "SELECT count(*) AS count FROM trace_events WHERE project_id = ? AND tree_id = ? AND node_id = ?",
+        projectId, treeId, child.id,
+      )?.count ?? 0;
+      const blockingDriftCount = this.database.get<{ count: number }>(`
+        SELECT count(*) AS count FROM plan_drift_records
+        WHERE project_id = ? AND tree_id = ? AND task_node_id = ?
+          AND severity = 'blocking' AND resolution_status = 'pending_user_confirmation'
+      `, projectId, treeId, child.id)?.count ?? 0;
+      return {
+        nodeId: child.id,
+        nodeRevisionId: child.node_revision_id,
+        title: child.title,
+        status: child.status,
+        confirmationState: child.confirmation_state,
+        executionPhase: body.executionPhase ?? null,
+        latestAttempt: attempt ? {
+          attemptId: attempt.id, attemptNumber: attempt.attempt_number, status: attempt.status,
+          startedAt: attempt.started_at, completedAt: attempt.completed_at,
+        } : null,
+        latestEvaluation: evaluation ? {
+          evaluationId: evaluation.id, attemptId: evaluation.execution_attempt_id, verdict: evaluation.verdict,
+          transitionApplied: evaluation.applied === 1, targetStatus: evaluation.target_status,
+          rejectionCode: evaluation.rejection_code,
+          coveredRequiredEvidence: JSON.parse(evaluation.covered_required_evidence_json) as string[],
+          missingRequiredEvidence: JSON.parse(evaluation.missing_required_evidence_json) as string[],
+          createdAt: evaluation.created_at,
+        } : null,
+        artifactCounts,
+        traceCount,
+        blockingDriftCount,
+      };
+    });
+    const statusRows = this.database.all<{ status: string; count: number }>(`
+      SELECT n.status, count(*) AS count
+      FROM task_nodes n
+      JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = ?
+      WHERE n.tree_id = ? AND n.parent_id = ?
+      GROUP BY n.status ORDER BY n.status
+    `, currentRevision.current_revision_id, treeId, parentNodeId);
+    const statusCounts = Object.fromEntries(statusRows.map((item) => [item.status, item.count]));
+    const total = statusRows.reduce((sum, item) => sum + item.count, 0);
+    const allChildrenSucceeded = total > 0 && (statusCounts.succeeded ?? 0) === total;
+    return {
+      childReports: reports,
+      childNextCursor: childRows.length > childLimit ? encodeCursor(childOffset + childLimit) : null,
+      childSummary: { total, statusCounts, allChildrenSucceeded, readyForParentEvaluation: allChildrenSucceeded },
     };
   }
 

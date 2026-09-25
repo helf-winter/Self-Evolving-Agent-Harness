@@ -91,6 +91,61 @@ describe("RuntimeQueryService", () => {
     database.close();
   });
 
+  it("derives paginated current-revision Child Task Reports for parent coordination", async () => {
+    const { database, tree, service } = await fixture();
+    const parentId = tree.document.nodes[0]!.id;
+    for (const [nodeId, title, status, confirmation, phase] of [
+      ["child-a", "Child A", "succeeded", "confirmed", "implementation"],
+      ["child-b", "Child B", "failed", "pending_user_confirmation", "verification"],
+    ] as const) {
+      database.run("INSERT INTO task_nodes (id, tree_id, parent_id, title, status) VALUES (?, ?, ?, ?, ?)", nodeId, tree.treeId, parentId, title, status);
+      database.run(
+        "INSERT INTO task_node_revisions (id, node_id, tree_revision_id, body_json, created_at) VALUES (?, ?, ?, ?, '2030-02-01')",
+        `${nodeId}-revision`, nodeId, tree.revisionId, JSON.stringify({ id: nodeId, parentId, title, children: [], executionPhase: phase, requiredEvidence: [{ key: "test", description: "tests" }] }),
+      );
+      database.run(
+        "INSERT INTO task_node_confirmation_states (project_id, tree_id, tree_revision_id, task_node_id, state, updated_at) VALUES ('p1', ?, ?, ?, ?, '2030-02-01')",
+        tree.treeId, tree.revisionId, nodeId, confirmation,
+      );
+    }
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at, completed_at) VALUES ('child-a-attempt', 'p1', ?, 'child-a', 'child-a-revision', 1, 'succeeded', '2030-02-02', '2030-02-03')", tree.treeId);
+    database.run("INSERT INTO evaluations (id, project_id, tree_id, task_node_id, task_node_revision_id, execution_attempt_id, verdict, evidence_refs_json, covered_required_evidence_json, missing_required_evidence_json, risk_summary, created_at) VALUES ('child-a-evaluation', 'p1', ?, 'child-a', 'child-a-revision', 'child-a-attempt', 'succeeded', '[\"child-a-trace\"]', '[\"test\"]', '[]', '', '2030-02-03')", tree.treeId);
+    database.run("INSERT INTO lifecycle_transition_records (id, evaluation_id, task_node_id, policy_version, from_status, target_status, applied, rejection_code, created_at) VALUES ('child-a-transition', 'child-a-evaluation', 'child-a', 'v1', 'verifying', 'succeeded', 1, NULL, '2030-02-03')");
+    database.run("INSERT INTO trace_events (id, project_id, tree_id, node_id, session_id, event_name, payload_json, occurred_at, idempotency_key) VALUES ('child-a-trace', 'p1', ?, 'child-a', 'child-run', 'PostToolUse', '{}', '2030-02-02', 'child-a-trace')", tree.treeId);
+    database.run("INSERT INTO artifacts (id, project_id, tree_id, kind, locator, status, metadata_json, created_at, updated_at, confidence) VALUES ('child-a-artifact', 'p1', ?, 'file', 'src/child-a.ts', 'modified', '{}', '2030-02-02', '2030-02-02', 'observed')", tree.treeId);
+    database.run("INSERT INTO task_node_artifact_links (id, project_id, tree_id, tree_revision_id, task_node_id, task_node_revision_id, artifact_id, relation_type, source_planning_revision_id, created_at) VALUES ('child-a-link', 'p1', ?, ?, 'child-a', 'child-a-revision', 'child-a-artifact', 'modifies', ?, '2030-02-02')", tree.treeId, tree.revisionId, tree.revisionId);
+    new PlanDriftService(database).recordDrift({
+      projectId: "p1", treeId: tree.treeId, nodeId: "child-b", driftType: "relation_changed", severity: "blocking",
+      description: "Child B contract drift", explanation: "Child B no longer matches its parent contract",
+      recommendation: "Refine Child B before parent verification",
+    });
+
+    const first = service.getTaskNodeDetail("p1", parentId, { childLimit: 1 });
+    expect(first.childSummary).toEqual({
+      total: 2, statusCounts: { blocked: 1, succeeded: 1 }, allChildrenSucceeded: false, readyForParentEvaluation: false,
+    });
+    expect(first.childReports).toEqual([expect.objectContaining({
+      nodeId: "child-a", nodeRevisionId: "child-a-revision", status: "succeeded", confirmationState: "confirmed",
+      executionPhase: "implementation", latestAttempt: expect.objectContaining({ attemptId: "child-a-attempt", status: "succeeded" }),
+      latestEvaluation: expect.objectContaining({
+        evaluationId: "child-a-evaluation", verdict: "succeeded", transitionApplied: true,
+        targetStatus: "succeeded", coveredRequiredEvidence: ["test"], missingRequiredEvidence: [],
+      }),
+      artifactCounts: { total: 1, planned: 0, actual: 1 }, traceCount: 1, blockingDriftCount: 0,
+    })]);
+    expect(first.childNextCursor).toBeTruthy();
+    const second = service.getTaskNodeDetail("p1", parentId, { childLimit: 1, childCursor: first.childNextCursor! });
+    expect(second.childReports).toEqual([expect.objectContaining({
+      nodeId: "child-b", status: "blocked", confirmationState: "pending_user_confirmation",
+      executionPhase: "verification", latestAttempt: null, latestEvaluation: null,
+      artifactCounts: { total: 0, planned: 0, actual: 0 }, traceCount: 1, blockingDriftCount: 1,
+    })]);
+    expect(second.childNextCursor).toBeNull();
+    expect(() => service.getTaskNodeDetail("p2", parentId, { childLimit: 1 }))
+      .toThrow(expect.objectContaining({ code: "not_found" }));
+    database.close();
+  });
+
   it("returns project-scoped Artifact Graph and filtered Plan Drift views", async () => {
     const { database, tree, service } = await fixture();
     const graph = service.getArtifactGraphSummary("p1", { treeId: tree.treeId, limit: 10 });

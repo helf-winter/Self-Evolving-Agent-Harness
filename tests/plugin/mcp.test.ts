@@ -60,6 +60,9 @@ describe("Harness MCP binding", () => {
     expect(tools.find((tool) => tool.name === "harness_get_task_refinement_history")?.inputSchema).toMatchObject({
       properties: { treeId: { type: "string" }, limit: { type: "integer" } },
     });
+    expect(tools.find((tool) => tool.name === "harness_get_task_node_detail")?.inputSchema).toMatchObject({
+      properties: { childLimit: { type: "integer" }, childCursor: { type: "string" } },
+    });
     expect(tools.find((tool) => tool.name === "harness_get_trace_events")?.inputSchema).toMatchObject({
       properties: { runId: { type: "string" } },
     });
