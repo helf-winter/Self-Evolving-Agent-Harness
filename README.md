@@ -241,6 +241,40 @@ Agent 通过 Runtime Tools 执行下列链路：
 
 Readiness 结果和确认提示都绑定创建时的 Task Tree revision。树结构发生变化后，旧提示会返回 `revision_conflict`，不会被套用到新版本。部分分支确认不会自动确认兄弟分支，也不会让未确认节点进入执行阶段。
 
+## Jev 语义评估（可行性已验证，尚未接入）
+
+项目计划将 [TypeSafe Jev](https://docs.typesafe.ai/introduction) 作为可选的语义评估 Provider，用于补足确定性规则无法回答的问题，例如：一条 Trace Evidence 的内容是否真正支持对应的 Acceptance Criterion、是否存在遗漏风险，以及是否需要人工复核。
+
+Jev 不替代测试、构建、Trace、Evaluation 或 Lifecycle Transition Policy，也不能直接把 Task Node 标记为 `succeeded`。预期链路为：
+
+```text
+Trace + Artifact + Execution Attempt
+                 ↓
+       脱敏 Evaluation Snapshot
+                 ↓
+      Jev Evaluation Provider
+      ├─ Evidence 语义匹配度
+      ├─ 风险与遗漏判断
+      ├─ 人工复核建议
+      └─ 概率与置信度
+                 ↓
+ Deterministic Lifecycle Policy
+                 ↓
+       Task Node 状态迁移
+```
+
+2026-09-19 的内部可行性试验使用 6 条英文和 6 条中文合成任务记录：12/12 直接 verdict 符合预期，48/48 原子判断方向符合预期；两次批量请求共使用 8,070 个输入 token，成本约 `$0.00034`。该结果仅证明值得继续集成，不代表真实工程数据上的准确率或公开 benchmark。
+
+正式接入时必须满足以下边界：
+
+- 默认可关闭，并固定经过验证的模型版本；
+- 仅发送脱敏、最小化的 Evaluation Snapshot，不发送源码、密钥或完整命令输出；
+- Provider 超时、失败或低置信度时降级为 `uncertain`，不得猜测成功；
+- 保存模型版本、概率、置信度、token 用量和耗时，作为可追溯 Evaluation Evidence；
+- `TYPESAFE_API_KEY` 只从运行环境读取，不进入仓库、Runtime Database 或 Trace。
+
+第一阶段计划只实现 `JevEvaluationProvider` 的 Evidence 语义验证，不让 Jev 参与 Task Tree 规划、代码生成或确定性状态迁移。
+
 ## 在 Claude Code 中加载
 
 先构建，再从仓库目录启动：
