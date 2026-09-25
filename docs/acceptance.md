@@ -236,14 +236,32 @@ npm test -- --run tests/integration/hook-ingestion.test.ts tests/integration/run
 npm test -- --run tests/integration/task-tree-service.test.ts tests/integration/cli.test.ts tests/e2e/task-tree-collection-lifecycle.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 14. 安全检查
+## 14. Parent–Child Task Communication
+
+创建一棵包含非叶子 verification 父节点和至少一个直接子节点的已确认 Task Tree：
+
+1. 在子节点尚未成功时启动父节点 Attempt；必须在写入前返回 `node_execution_rejected`，不得产生父节点 Attempt。
+2. 以 skeleton 阶段执行上层节点；确认子节点未成功不会阻断 skeleton 框架工作。
+3. 为子节点产生 Hook Trace、required evidence 和成功 Evaluation；调用 `harness_get_task_node_detail` 查询父节点，确认 `childReports` 投影最新 Attempt、Evaluation、证据覆盖、Artifact、Trace 和阻断 Drift 数量。
+4. 重启 Runtime 后再次查询；Child Task Report 与 `childSummary` 必须由持久化事实稳定恢复，不依赖进程内缓存或聊天上下文。
+5. 确认 `childSummary.allSucceeded` 与 `readyForParentEvaluation` 为真后启动父节点 Attempt；父节点仍需自己的证据与成功 Evaluation，不得由子节点状态自动成功。
+6. 创建超过单页上限的直接子节点；确认 `childLimit`、`childCursor` 与 `childNextCursor` 能稳定分页，默认 50、最大 200。
+7. 使用另一个 Project 的 tree/node ID 查询或执行；必须返回 `not_found`，不得泄漏 Child Task Report。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/runtime-query.test.ts tests/integration/node-execution.test.ts tests/e2e/parent-child-task-communication.test.ts tests/plugin/mcp.test.ts
+```
+
+## 15. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 15. 当前不作为验收失败的范围
+## 16. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

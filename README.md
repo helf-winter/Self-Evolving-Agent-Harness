@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context，以及 Task Tree Collection Lifecycle 十三个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle，以及 Parent–Child Task Communication 十四个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -35,6 +35,8 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Runtime Plugin 使用稳定 ID 和不可变 revision，通过精确 provides/requires contract、固定点依赖协调与 composition state 实现空间组合；
 - Plugin registration 和 Effect 由 revision 生命周期拥有；替换/卸载只接受证据化 disposition，并支持影响闭包、冲突重试、失败恢复和 provider 恢复后的依赖重激活；
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
+- 父节点按当前 Task Tree revision 获得一跳 Child Task Reports；报告派生自 Attempt、Evaluation、Evidence、Artifact、Trace 与 Drift 事实，不维护第二份可漂移状态；
+- 可执行的非叶子 verification 节点只有在当前直接子节点全部成功后才能创建 Attempt，且父节点仍必须完成自己的独立 Evaluation；
 - Bash CLI、Claude 插件 Skills 和 63 个 MCP Runtime Tools。
 
 ## 环境要求
@@ -107,6 +109,17 @@ Task Tree 属于 Project，而不是聊天 Session。一个 Project 可以保留
 - 恢复会回到归档前状态，但不会自动选择、执行或重新激活 Workflow；
 - 当前树存在 `running` 或 `verifying` Attempt 时，切换、新建或归档会被拒绝，必须先完成或中止该 Attempt；
 - CLI 的 `tree select/archive/restore` 与 MCP 的 `harness_select_task_tree`、`harness_archive_task_tree`、`harness_restore_task_tree` 使用同一事务化服务逻辑，并始终按当前目录绑定的 Project 隔离。
+
+### Parent–Child Task Communication
+
+Task Tree 中的父子通信不是额外维护一份可变汇报，而是 Runtime 从当前 revision 的执行事实中投影：
+
+- `harness_get_task_node_detail` 返回分页的一跳 `childReports`、`childNextCursor` 与聚合 `childSummary`；默认最多 50 条，最大 200 条；
+- 每个 Child Task Report 包含节点状态、确认状态、执行阶段、最新 Attempt、当前 revision 的最新 Evaluation、证据覆盖、Artifact 数量、Trace 数量与未解决阻断 Drift 数量；
+- `childSummary.readyForParentEvaluation` 只有在当前直接子节点全部为 `succeeded` 时才为真；历史 revision 的成功不能冒充当前执行结果；
+- skeleton 阶段仍可先搭建上层框架；进入非叶子 verification 节点执行时，Runtime 会在创建 Attempt 前确定性校验所有当前直接子节点；
+- 子节点成功只满足父节点的前置条件，不会自动把父节点标记成功。父节点必须产生自己的 Attempt、证据和 Evaluation；
+- 所有查询和门禁都由当前 Project 解析 tree/node，不会通过 ID 读取其他项目的数据。
 
 ### Project Identity 与 Clone
 
