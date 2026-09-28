@@ -55,7 +55,13 @@ export class HookIngestionService {
         `, project.projectId)
       : undefined;
     const mutation = event.eventName === "PreToolUse" && this.isMutation(event);
-    if (!workflow && !mutation) return { recorded: false, reason: "inactive" };
+    const pendingAffiliationAnswer = project.status === "same_project" && event.eventName === "UserPromptSubmit" && Boolean(
+      this.database.get(`
+        SELECT id FROM task_affiliation_decisions
+        WHERE project_id = ? AND status = 'pending' LIMIT 1
+      `, project.projectId),
+    );
+    if (!workflow && !mutation && !pendingAffiliationAnswer) return { recorded: false, reason: "inactive" };
     if (project.status !== "same_project") project = await this.projects.resolve(event.cwd, "persist");
     if (project.status === "identity_conflict") return { recorded: false, reason: "inactive" };
     workflow ??= this.database.get<WorkflowContext>(`

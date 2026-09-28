@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HookIngestionService } from "../../src/application/hook-ingestion-service.js";
 import { ProjectIdentityService } from "../../src/application/project-identity-service.js";
+import { TaskAffiliationService } from "../../src/application/task-affiliation-service.js";
 import { TaskTreeService } from "../../src/application/task-tree-service.js";
 import { mapClaudeHook } from "../../src/bindings/claude/hook-mapper.js";
 import { RuntimeDatabase } from "../../src/storage/database.js";
@@ -98,6 +99,34 @@ describe("Claude hook ingestion", () => {
     expect(result).toEqual({ recorded: false, reason: "inactive" });
     expect(database.all("SELECT id FROM projects")).toEqual([]);
     await expect(readFile(path.join(directory, ".agent-harness-project.json"))).rejects.toThrow();
+    database.close();
+  });
+
+  it("records a user answer while Task affiliation confirmation is pending without an active tree", async () => {
+    const { directory, database, service } = await fixture();
+    const project = await new ProjectIdentityService(database).resolve(directory, "persist");
+    const proposal = new TaskAffiliationService(database).propose({
+      projectId: project.projectId,
+      requestTitle: "Add an audit endpoint",
+      recommendation: "new_tree",
+    });
+
+    const result = await service.ingest(mapClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: "affiliation-answer",
+      cwd: directory,
+      prompt: "Create a new tree",
+    }));
+
+    expect(result).toMatchObject({ recorded: true, violation: false, blocked: false });
+    if (!result.recorded) throw new Error("answer Trace was not recorded");
+    expect(database.get<{ tree_id: string | null; event_name: string }>(
+      "SELECT tree_id, event_name FROM trace_events WHERE id = ?", result.eventId,
+    )).toEqual({ tree_id: null, event_name: "UserPromptSubmit" });
+    expect(database.get<{ status: string }>(
+      "SELECT status FROM task_affiliation_decisions WHERE id = ?", proposal.decisionId,
+    )?.status).toBe("pending");
+    expect(database.all("SELECT id FROM task_trees")).toEqual([]);
     database.close();
   });
 

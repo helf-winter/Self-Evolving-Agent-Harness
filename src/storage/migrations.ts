@@ -1008,4 +1008,29 @@ export const migrations: Migration[] = [{
       BEFORE DELETE ON task_tree_collection_transitions
       BEGIN SELECT RAISE(ABORT, 'task tree collection transitions are immutable'); END;
   `,
+}, {
+  version: 14,
+  sql: `
+    CREATE TABLE task_affiliation_decisions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      request_trace_event_id TEXT NOT NULL UNIQUE REFERENCES trace_events(id) ON DELETE RESTRICT,
+      request_title TEXT NOT NULL,
+      candidate_query TEXT NOT NULL,
+      candidate_snapshot_json TEXT NOT NULL,
+      recommendation TEXT NOT NULL CHECK(recommendation IN ('new_tree', 'merge')),
+      recommended_tree_id TEXT REFERENCES task_trees(id) ON DELETE SET NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'new_tree', 'merged', 'paused')),
+      confirmation_prompt_id TEXT NOT NULL UNIQUE REFERENCES runtime_confirmation_prompts(id) ON DELETE RESTRICT,
+      runtime_action_id TEXT NOT NULL UNIQUE REFERENCES runtime_actions(id) ON DELETE RESTRICT,
+      answer_trace_event_id TEXT REFERENCES trace_events(id) ON DELETE RESTRICT,
+      resolved_tree_id TEXT REFERENCES task_trees(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL,
+      resolved_at TEXT
+    );
+    CREATE UNIQUE INDEX one_pending_task_affiliation_per_project
+      ON task_affiliation_decisions(project_id) WHERE status = 'pending';
+    CREATE INDEX task_affiliation_history_idx
+      ON task_affiliation_decisions(project_id, created_at DESC, id DESC);
+  `,
 }];

@@ -119,6 +119,10 @@ export class RuntimeQueryService {
       "SELECT count(*) AS count FROM runtime_confirmation_prompts WHERE project_id = ? AND status = 'pending'",
       projectId,
     )?.count ?? 0;
+    const pendingAffiliationCount = this.database.get<{ count: number }>(
+      "SELECT count(*) AS count FROM task_affiliation_decisions WHERE project_id = ? AND status = 'pending'",
+      projectId,
+    )?.count ?? 0;
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
@@ -126,11 +130,12 @@ export class RuntimeQueryService {
       workflow: workflow ? { treeId: workflow.tree_id, stage: workflow.stage, revision: workflow.revision } : null,
       pendingConfirmation: confirmation ? { confirmationId: confirmation.id, scopeId: confirmation.scope_id, prompt: confirmation.prompt } : null,
       pendingConfirmationCount,
+      pendingAffiliationCount,
       blockerCount: readiness ? (JSON.parse(readiness.blockers_json) as unknown[]).length : 0,
       activeAttemptCount,
       confirmationCounts,
       driftCounts,
-      availableActions: this.availableActions(workflow?.stage),
+      availableActions: this.availableActions(workflow?.stage, pendingAffiliationCount > 0),
     };
   }
 
@@ -1601,11 +1606,18 @@ export class RuntimeQueryService {
     return counts;
   }
 
-  private availableActions(stage?: string): string[] {
-    if (!stage) return ["create_task_root"];
-    if (stage === "draft_task_tree" || stage === "task_tree_refinement") return ["save_draft", "scan_readiness", "request_confirmation"];
-    if (stage === "branch_confirmation") return ["confirm_scope", "refine_tree"];
-    if (stage === "skeleton_pass") return ["execute_skeleton", "inspect_detail"];
-    return ["inspect_detail", "record_evidence"];
+  private availableActions(stage?: string, pendingAffiliation = false): string[] {
+    const stageActions = !stage
+      ? ["propose_task_affiliation"]
+      : stage === "draft_task_tree" || stage === "task_tree_refinement"
+        ? ["save_draft", "scan_readiness", "request_confirmation"]
+        : stage === "branch_confirmation"
+          ? ["confirm_scope", "refine_tree"]
+          : stage === "skeleton_pass"
+            ? ["execute_skeleton", "inspect_detail"]
+            : ["inspect_detail", "record_evidence"];
+    return pendingAffiliation
+      ? ["resolve_task_affiliation", "inspect_task_affiliations", ...stageActions]
+      : stageActions;
   }
 }

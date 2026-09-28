@@ -13,6 +13,7 @@ import { FailureCaseService } from "./failure-case-service.js";
 import { EvolutionService } from "./evolution-service.js";
 import { ReplacementService } from "./replacement-service.js";
 import { PluginCompositionService } from "./plugin-composition-service.js";
+import { TaskAffiliationService } from "./task-affiliation-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -26,6 +27,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     database,
     projects,
     taskTrees: new TaskTreeService(database),
+    affiliations: new TaskAffiliationService(database),
     workflows: new WorkflowService(database),
     executions: new NodeExecutionService(database),
     evaluations: new EvaluationService(database, failures, evolution),

@@ -83,6 +83,14 @@ export class TaskTreeService {
   }
 
   async createTaskRoot(input: { projectId: string; title: string }): Promise<TaskTreeRevisionView> {
+    return this.createTaskRootRecord(input, false);
+  }
+
+  createTaskRootWithinTransaction(input: { projectId: string; title: string }): TaskTreeRevisionView {
+    return this.createTaskRootRecord(input, true);
+  }
+
+  private createTaskRootRecord(input: { projectId: string; title: string }, withinTransaction: boolean): TaskTreeRevisionView {
     if (!input.title.trim()) throw new HarnessError("invalid_input", "task root title is required");
     this.requireProject(input.projectId);
     const treeId = newId();
@@ -93,7 +101,7 @@ export class TaskTreeService {
       nodes: [{ id: nodeId, parentId: null, title: input.title.trim(), children: [] }],
       relations: [], artifacts: [],
     };
-    this.database.transaction(() => {
+    const persist = () => {
       const previousSelectedTreeId = this.selectedTreeId(input.projectId);
       if (previousSelectedTreeId) this.assertNoActiveAttempt(input.projectId, previousSelectedTreeId);
       this.database.run(
@@ -120,7 +128,9 @@ export class TaskTreeService {
         projectId: input.projectId, treeId, action: "selected", fromStatus: "draft", toStatus: "draft",
         previousSelectedTreeId, selectedTreeId: treeId, timestamp,
       });
-    });
+    };
+    if (withinTransaction) persist();
+    else this.database.transaction(persist);
     return { treeId, revisionId, revision: 1, title: input.title.trim(), status: "draft", document };
   }
 
@@ -347,7 +357,11 @@ export class TaskTreeService {
   }
 
   selectTaskTree(input: { projectId: string; treeId: string }) {
-    return this.database.transaction(() => {
+    return this.database.transaction(() => this.selectTaskTreeWithinTransaction(input));
+  }
+
+  selectTaskTreeWithinTransaction(input: { projectId: string; treeId: string }) {
+    const select = () => {
       const tree = this.requireTree(input.projectId, input.treeId);
       if (tree.status === "archived") {
         throw new HarnessError("task_tree_transition_rejected", "an archived Task Tree must be restored before it can be selected");
@@ -384,7 +398,8 @@ export class TaskTreeService {
         treeId: tree.id, title: tree.title, status: tree.status, selected: true,
         previousSelectedTreeId, selectedTreeId: tree.id, transitionId,
       };
-    });
+    };
+    return select();
   }
 
   archiveTaskTree(input: { projectId: string; treeId: string }) {

@@ -25,6 +25,7 @@ describe("Harness MCP binding", () => {
       "harness_create_task_root", "harness_get_runtime_snapshot", "harness_get_task_node_detail",
       "harness_get_task_tree_summary", "harness_get_trace_events", "harness_list_task_tree_candidates",
       "harness_get_tree_view",
+      "harness_propose_task_affiliation", "harness_resolve_task_affiliation", "harness_get_task_affiliations",
       "harness_select_task_tree", "harness_archive_task_tree", "harness_restore_task_tree",
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
@@ -53,6 +54,14 @@ describe("Harness MCP binding", () => {
     });
     expect(tools.find((tool) => tool.name === "harness_list_task_tree_candidates")?.inputSchema).toMatchObject({
       properties: { includeArchived: { type: "boolean" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_propose_task_affiliation")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["requestTitle", "recommendation"]),
+      properties: { recommendation: { enum: ["new_tree", "merge"] }, recommendedTreeId: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_resolve_task_affiliation")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["decisionId", "choice", "answerTraceEventId"]),
+      properties: { choice: { enum: ["new_tree", "merge", "pause"] }, chosenTreeId: { type: "string" } },
     });
     expect(tools.find((tool) => tool.name === "harness_apply_draft_change_set")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["sourceUserMessageTraceEventId", "decision"]),
@@ -167,6 +176,20 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_plugins", arguments: { state: "active" } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_plugin_detail", arguments: { pluginId: "test-runtime-plugin" } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_reconcile_plugins", arguments: {} })).isError).not.toBe(true);
+    const affiliation = await client.callTool({
+      name: "harness_propose_task_affiliation",
+      arguments: {
+        cwd: project, requestTitle: "Extend Runtime", candidateQuery: "Runtime", recommendation: "merge",
+        recommendedTreeId: createdValue.treeId,
+      },
+    });
+    expect(affiliation.isError).not.toBe(true);
+    const affiliationContent = (affiliation as { content: Array<{ type: string; text?: string }> }).content;
+    const affiliationValue = JSON.parse(affiliationContent[0]?.type === "text" ? affiliationContent[0].text ?? "null" : "null") as { decisionId: string };
+    const affiliations = await client.callTool({ name: "harness_get_task_affiliations", arguments: { cwd: project } });
+    const affiliationsContent = (affiliations as { content: Array<{ type: string; text?: string }> }).content;
+    expect(JSON.parse(affiliationsContent[0]?.type === "text" ? affiliationsContent[0].text ?? "null" : "null"))
+      .toEqual([expect.objectContaining({ decisionId: affiliationValue.decisionId, status: "pending" })]);
     expect((await client.callTool({
       name: "harness_propose_user_change",
       arguments: {
@@ -177,7 +200,10 @@ describe("Harness MCP binding", () => {
     const snapshot = await client.callTool({ name: "harness_get_runtime_snapshot", arguments: { cwd: project } });
     const content = (snapshot as { content: Array<{ type: string; text?: string }> }).content;
     const parsed = JSON.parse(content[0]?.type === "text" ? content[0].text ?? "null" : "null") as { workflow: { stage: string } };
-    expect(parsed.workflow.stage).toBe("draft_task_tree");
+    expect(parsed).toMatchObject({
+      workflow: { stage: "draft_task_tree" }, pendingAffiliationCount: 1,
+      availableActions: expect.arrayContaining(["resolve_task_affiliation"]),
+    });
     await client.close();
     await harness.close();
   });

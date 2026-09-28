@@ -222,6 +222,38 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     ...(query ? { query } : {}), ...(includeArchived ? { includeArchived: true } : {}),
   })));
 
+  server.registerTool("harness_propose_task_affiliation", {
+    description: "Persist a coding request's deterministic Task Tree candidates and ask the user to choose new tree, merge, or pause before planning.",
+    inputSchema: {
+      cwd: cwdSchema, requestTitle: z.string().min(1), candidateQuery: z.string().min(1).optional(),
+      recommendation: z.enum(["new_tree", "merge"]), recommendedTreeId: z.string().min(1).optional(),
+      runId: z.string().min(1).optional(),
+    },
+  }, ({ cwd, requestTitle, candidateQuery, recommendation, recommendedTreeId, runId }) => guarded(async () => runtime.affiliations.propose({
+    projectId: (await persistedProject(cwd)).projectId, requestTitle, recommendation,
+    ...(candidateQuery ? { candidateQuery } : {}), ...(recommendedTreeId ? { recommendedTreeId } : {}),
+    ...(runId ? { runId } : {}),
+  })));
+
+  server.registerTool("harness_resolve_task_affiliation", {
+    description: "Apply an evidence-backed user choice to create a new Task Tree, merge into a current Project tree, or pause.",
+    inputSchema: {
+      cwd: cwdSchema, decisionId: z.string().min(1), choice: z.enum(["new_tree", "merge", "pause"]),
+      answerTraceEventId: z.string().min(1), chosenTreeId: z.string().min(1).optional(),
+    },
+  }, ({ cwd, decisionId, choice, answerTraceEventId, chosenTreeId }) => guarded(async () => runtime.affiliations.resolve({
+    projectId: (await existingProject(cwd)).projectId, decisionId, choice, answerTraceEventId,
+    ...(chosenTreeId ? { chosenTreeId } : {}),
+  })));
+
+  server.registerTool("harness_get_task_affiliations", {
+    description: "Get Task affiliation decisions for the current Project, or one decision by ID.",
+    inputSchema: { cwd: cwdSchema, decisionId: z.string().min(1).optional() },
+  }, ({ cwd, decisionId }) => guarded(async () => {
+    const projectId = (await existingProject(cwd)).projectId;
+    return decisionId ? runtime.affiliations.get(projectId, decisionId) : runtime.affiliations.list(projectId);
+  }));
+
   server.registerTool("harness_select_task_tree", {
     description: "Select and resume one non-archived Task Tree in the current Project; active Attempts prevent switching.",
     inputSchema: { cwd: cwdSchema, treeId: z.string().min(1) },
