@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication、Tree-centered Runtime View、Task Affiliation Confirmation、Jev Evidence Semantic Evaluation，以及 Skeleton Gate Evaluation 十八个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication、Tree-centered Runtime View、Task Affiliation Confirmation、Jev Evidence Semantic Evaluation、Skeleton Gate Evaluation，以及 Branch Phase Orchestration 十九个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -37,10 +37,11 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Runtime Plugin 使用稳定 ID 和不可变 revision，通过精确 provides/requires contract、固定点依赖协调与 composition state 实现空间组合；
 - Plugin registration 和 Effect 由 revision 生命周期拥有；替换/卸载只接受证据化 disposition，并支持影响闭包、冲突重试、失败恢复和 provider 恢复后的依赖重激活；
 - Skeleton Gate 按当前 revision 逐分支核对成功 Attempt、Hook Trace、实际 Artifact、Contract 验证引用、验证命令和 blocking Drift；每次结果不可变保存，只有 `passed` 才自动进入分支实现，不接受模型自行声明“完成”；
+- Workflow 持久化当前活动分支及每个分支的 pending/active/implemented/verified 状态；实现、分支验证、下一分支和根验证只能由当前 revision 的确定性 Phase Gate 推进；
 - 父节点按当前 Task Tree revision 获得一跳 Child Task Reports；报告派生自 Attempt、Evaluation、Evidence、Artifact、Trace 与 Drift 事实，不维护第二份可漂移状态；
 - 可执行的非叶子 verification 节点只有在当前直接子节点全部成功后才能创建 Attempt，且父节点仍必须完成自己的独立 Evaluation；
 - Tree-centered View 以当前 Task Tree 为骨架提供 Snapshot、Summary、Detail 三档查询；默认只突出需关注关系，只有显式请求才返回可过滤的全局 Relation Overlay；
-- Bash CLI、Claude 插件 Skills 和 71 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 73 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -282,6 +283,17 @@ Readiness 结果和确认提示都绑定创建时的 Task Tree revision。树结
 - `harness_get_skeleton_gate_results` 与 Runtime Snapshot 可在重启后恢复结果、阻塞项数量和证据引用。
 
 没有 `planningVersion: 1` 的旧 Task Tree 采用明确标记的兼容策略，只要求当前 Skeleton 节点均有成功 Attempt；新规划不得依赖该兼容路径。
+
+### Branch Phase Orchestration
+
+Skeleton Gate 通过时，Runtime 按 Task Tree 中的顶层分支顺序建立当前 revision 的分支进度，并设置 `activeBranchNodeId`。Agent 只能在该分支内启动 implementation / branch verification Attempt：
+
+1. 完成活动分支的 implementation 节点后调用 `harness_evaluate_workflow_phase`；节点未成功或存在 scope 内 blocking Drift 时结果失败且阶段不变。
+2. Gate 通过后进入 `branch_verification`；活动分支必须具有 verification 节点，这些节点仍需独立 Attempt、Evidence 和 Evaluation。
+3. 分支验证 Gate 通过后，Runtime 将该分支标记为 `verified`，激活下一个 pending 分支并返回 `branch_implementation`；没有剩余分支时进入 `root_verification`。
+4. `root_verification` 只允许执行 Task Tree 根节点；根节点必须声明 verification phase，所有直接子节点成功后仍需独立验证。通过后进入 `final_report`。
+
+每次 Phase Gate 都保存不可变结果，可通过 `harness_get_workflow_phase_results` 或 Runtime Snapshot 恢复。迁移前已经处于执行阶段、但没有分支状态的旧 Workflow 保持兼容；所有经新 Skeleton Gate 推进的 Workflow 都强制活动分支隔离。
 
 ## Jev Evidence 语义评估
 

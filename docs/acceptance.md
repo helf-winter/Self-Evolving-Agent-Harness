@@ -325,14 +325,31 @@ npm test -- --run tests/unit/semantic-evaluation.test.ts tests/unit/jev-evaluati
 npm test -- --run tests/unit/skeleton-gate.test.ts tests/integration/skeleton-gate-service.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 19. 安全检查
+## 19. Branch Phase Orchestration
+
+使用至少两个已确认顶层分支的结构化 Task Tree 完成 Skeleton Gate：
+
+1. 确认 Runtime 初始化 ordered Branch State，只有第一分支为 active，Snapshot 返回 `activeBranchNodeId`。
+2. 尝试在 sibling 分支创建 implementation Attempt；必须返回 `attempt_not_executable`。完成活动分支实现节点前调用 `harness_evaluate_workflow_phase`；必须失败且不改变 revision。
+3. 活动分支全部 implementation 节点成功后再次评估；进入 `branch_verification`。若该分支没有 verification 节点，必须返回 `uncertain`，不得跳过。
+4. 分支 verification 节点均完成后评估；当前分支变为 verified，下一个分支变为 active，Workflow 返回 `branch_implementation`。
+5. 所有分支验证后进入 `root_verification`；非根节点不得创建 Attempt。根节点必须在所有直接子节点成功后完成自己的 Evidence 与 Evaluation。
+6. 根验证 Gate 通过后进入 `final_report`。重启后 `harness_get_workflow_phase_results`、Branch State、当前阶段和活动分支必须恢复，另一 Project 不得读取。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/skeleton-gate-service.test.ts tests/integration/node-execution-service.test.ts tests/plugin/mcp.test.ts
+```
+
+## 20. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 20. 当前不作为验收失败的范围
+## 21. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

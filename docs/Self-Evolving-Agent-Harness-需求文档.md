@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.32 |
+| 文档版本 | v0.33 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -49,6 +49,7 @@
 | v0.30 | 2026-09-28 | 明确 Task Tree 归属确认必须持久化候选快照、Runtime Action、用户回答 Trace 与最终新建/归并结果 | Codex |
 | v0.31 | 2026-09-28 | 增加可选 Jev Evidence 语义评估、脱敏快照、失败关闭策略和确定性生命周期边界 | Codex |
 | v0.32 | 2026-09-28 | 明确 Skeleton Gate 的当前修订事实判定、不可变结果、失败留在 Skeleton Pass 和自动阶段推进语义 | Codex |
+| v0.33 | 2026-09-28 | 增加活动分支、分支进度与 implementation / branch verification / root verification 确定性阶段 Gate | Codex |
 
 ## 2. 项目概述
 
@@ -1206,6 +1207,8 @@ AND children.length == 0
 6. 所有已确认分支完成后，执行父级或根级 verification
 ```
 
+Workflow 必须显式保存当前活动顶层分支以及当前 revision 中每个顶层分支的 `pending / active / implemented / verified` 状态。`branch_implementation` 和 `branch_verification` 期间，只允许在活动分支子树内创建对应阶段的 Execution Attempt；一个分支验证通过后，Runtime 才能激活下一个分支。全部分支 verified 后进入 `root_verification`，该阶段只允许根 Task Node 执行独立 verification。阶段变化必须由当前 revision 的节点状态、Evaluation 与 blocking Drift 事实驱动，不得由 Agent 手工跳转。
+
 每个顶层功能分支的 `Skeleton Acceptance Criteria` 至少应包含：
 
 - `expected_artifacts`：预期创建或确认存在的目录、模块、接口、Schema、测试入口和配置；
@@ -2238,6 +2241,30 @@ Skeleton Acceptance Criteria 是 planning revision 中的不可变计划定义�
 | evidence_trace_ids | 支撑结果的 Hook Trace Evidence |
 | created_at | 评估时间；结果不可更新或删除 |
 
+#### Workflow Branch State
+
+| 字段 | 描述 |
+| --- | --- |
+| project_id / task_tree_id / task_tree_revision_id | 分支状态的严格 revision 归属 |
+| branch_task_node_id | 顶层功能分支；旧树兼容模式可使用根节点 |
+| branch_order | Task Tree 中的稳定执行顺序 |
+| status | pending、active、implemented、verified |
+| updated_at | 最近一次确定性阶段迁移时间 |
+
+#### Workflow Phase Gate Result
+
+| 字段 | 描述 |
+| --- | --- |
+| workflow_phase_gate_result_id | 不可变阶段 Gate 结果标识 |
+| task_tree_revision_id / workflow_revision | 被评估的精确树与 Workflow 版本 |
+| stage | branch_implementation、branch_verification、root_verification |
+| branch_task_node_id | 当前活动分支；根验证时为空 |
+| status | passed、failed、uncertain |
+| required_node_ids / incomplete_node_ids | 当前阶段要求和尚未成功的节点 |
+| blocking_drift_ids / blocker_codes | 阶段阻塞事实和确定性原因 |
+| next_stage / next_branch_task_node_id | 通过时的下一阶段与下一活动分支 |
+| created_at | 评估时间；结果不可更新或删除 |
+
 #### Task Relation Edge
 
 | 字段 | 描述 |
@@ -2970,6 +2997,8 @@ Evaluation 接口不得直接写入 Task Node Status。状态变化必须提交�
 
 对于结构化规划，每个已确认顶层分支都必须具有完整 Skeleton Acceptance Criteria。Artifact 仅因计划为 `planned` 不得视为已形成；命令仅因历史运行过不得视为当前 Skeleton 证据；Contract 必须属于当前 Artifact Graph revision 并具有 carrier 或 validation reference 证据。只有 `passed` 可以在同一事务中推进至 `branch_implementation`。`failed` 或 `uncertain` 必须保持 `skeleton_pass`，并返回可定位的 blocker codes。所有结果必须不可变、可重启恢复、按 Project 隔离。
 
+Skeleton Gate 通过时必须初始化当前 revision 的 Workflow Branch State 并选择第一个活动分支。系统必须提供 Workflow Phase Gate 接口，按活动分支依次校验 implementation 与 verification 节点；分支验证完成后自动选择下一个 pending 分支，全部完成后进入 root verification。root verification 只允许根 Task Node，并要求独立 Evaluation。任何阶段缺少声明的 verification 节点时返回 `uncertain`，不得静默跳过。
+
 ### 8.13 Evolution 接口
 
 系统需要支持从适用 Evaluation 序列生成 Experience、冻结 Skill Candidate Revision、Skill Test Case、Skill Validation Run、Skill Validation Report 和 Failure Case。
@@ -3070,7 +3099,7 @@ Runtime Action 接口必须对 `action_type`、`target_id`、`expected_revision`
 | Agent Runtime Binding | Claude、Codex 或自研 Agent Runtime 能通过兼容绑定机制具备 Harness Runtime Layer，并产生统一 Runtime Event |
 | Skill / Plugin 分发 | 同一 Harness Skill 能以对应方式分发到至少两个不同 Agent 环境 |
 | Skills / Workflows | 能通过 task-tree-planning、branch-execution、verification-reporting、drift-handling 等 Skill 约束 Agent 行为，并通过 coding-task-workflow 编排完整 coding task |
-| Workflow State Machine | 能记录 current_workflow、current_stage、allowed_actions、forbidden_actions，并能被 Hooks 用于校验实际行为 |
+| Workflow State Machine | 能记录 current_workflow、current_stage、active_branch、分支进度、allowed_actions、forbidden_actions，并能被 Hooks 和 Attempt 门禁用于校验实际行为；阶段不得由 Agent 手工越级 |
 | Runtime Records | 能持久化 workflow_state、task_tree、trace、artifact、evaluation、experience、failure_case、failure_reproduction_revision、reproduction_validation_result、skill_candidate 等记录 |
 | 工具事件分类 | 能区分 read_only、mutation、verification、external_side_effect |
 | Trace System | 能作为追加式事实源，从任务追溯到工具调用、文件变更、验证结果和能力沉淀依据；历史事件不会被当前 Artifact 状态覆盖 |
