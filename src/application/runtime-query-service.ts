@@ -1,5 +1,11 @@
 import { HarnessError } from "../domain/errors.js";
-import type { TaskNodeInput, TaskTreeDocument } from "../domain/task-tree.js";
+import {
+  normalizeRelationKind,
+  type CanonicalRelationKind,
+  type TaskNodeInput,
+  type TaskRelationInput,
+  type TaskTreeDocument,
+} from "../domain/task-tree.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 import type { PlanDriftResolutionStatus, PlanDriftSeverity } from "./plan-drift-service.js";
 import type { UserChangeType } from "../domain/runtime-action.js";
@@ -161,6 +167,236 @@ export class RuntimeQueryService {
       artifactCounts,
       driftCounts: this.getDriftCounts(projectId, treeId),
       confirmationCounts: this.getConfirmationCounts(projectId, treeId),
+    };
+  }
+
+  getTreeView(projectId: string, query: {
+    treeId: string;
+    depth: "snapshot" | "summary" | "detail";
+    selectedNodeId?: string;
+    includeRelationOverlay?: boolean;
+    relationKinds?: CanonicalRelationKind[];
+    direction?: "incoming" | "outgoing";
+    branchRootNodeId?: string;
+    relationStatuses?: Array<"active" | "blocked_dependency" | "unconfirmed_dependency" | "missing_artifact" | "cycle">;
+    risks?: Array<"low" | "medium" | "high">;
+    nodeStatuses?: string[];
+    artifactId?: string;
+  }) {
+    this.requireProject(projectId);
+    const tree = this.database.get<{
+      id: string; title: string; status: string; current_revision_id: string;
+    }>("SELECT id, title, status, current_revision_id FROM task_trees WHERE id = ? AND project_id = ?", query.treeId, projectId);
+    if (!tree) throw new HarnessError("not_found", "Task Tree was not found in the current project");
+    const revision = this.database.get<{ revision: number; document_json: string }>(
+      "SELECT revision, document_json FROM task_tree_revisions WHERE id = ?", tree.current_revision_id,
+    )!;
+    const document = JSON.parse(revision.document_json) as TaskTreeDocument;
+    const documentNodes = new Map(document.nodes.map((node) => [node.id, node]));
+    const runtimeSelectedNode = this.database.get<{ selected_node_id: string | null }>(
+      "SELECT selected_node_id FROM runtime_states WHERE project_id = ? AND selected_tree_id = ?", projectId, tree.id,
+    )?.selected_node_id ?? null;
+    const defaultNodeId = document.nodes.find((node) => node.parentId === null)?.id ?? null;
+    const selectedNodeId = query.selectedNodeId ?? (runtimeSelectedNode && documentNodes.has(runtimeSelectedNode) ? runtimeSelectedNode : defaultNodeId);
+    if (selectedNodeId && !documentNodes.has(selectedNodeId)) {
+      throw new HarnessError("not_found", "selected Task Node was not found in the requested Task Tree");
+    }
+    if (query.branchRootNodeId && !documentNodes.has(query.branchRootNodeId)) {
+      throw new HarnessError("not_found", "branch root was not found in the requested Task Tree");
+    }
+
+    const nodeRows = this.database.all<{
+      node_id: string; node_revision_id: string; status: string; confirmation_state: string;
+    }>(`
+      SELECT n.id AS node_id, nr.id AS node_revision_id, n.status,
+             COALESCE(cs.state, 'draft') AS confirmation_state
+      FROM task_nodes n
+      JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = ?
+      LEFT JOIN task_node_confirmation_states cs
+        ON cs.task_node_id = n.id AND cs.tree_revision_id = ?
+      WHERE n.tree_id = ?
+    `, tree.current_revision_id, tree.current_revision_id, tree.id);
+    const nodeFacts = new Map(nodeRows.map((row) => [row.node_id, row]));
+    const artifactRows = this.database.all<{
+      task_node_id: string; artifact_id: string; confidence: string;
+    }>(`
+      SELECT l.task_node_id, l.artifact_id, a.confidence
+      FROM task_node_artifact_links l
+      JOIN artifacts a ON a.id = l.artifact_id AND a.project_id = l.project_id
+      WHERE l.project_id = ? AND l.tree_id = ? AND l.tree_revision_id = ?
+      ORDER BY l.task_node_id, l.artifact_id
+    `, projectId, tree.id, tree.current_revision_id);
+    const artifactsByNode = new Map<string, Array<{ artifactId: string; confidence: string }>>();
+    for (const row of artifactRows) {
+      const items = artifactsByNode.get(row.task_node_id) ?? [];
+      items.push({ artifactId: row.artifact_id, confidence: row.confidence });
+      artifactsByNode.set(row.task_node_id, items);
+    }
+    const driftRows = this.database.all<{ task_node_id: string; severity: string; resolution_status: string }>(`
+      SELECT task_node_id, severity, resolution_status FROM plan_drift_records
+      WHERE project_id = ? AND tree_id = ? AND task_node_id IS NOT NULL
+    `, projectId, tree.id);
+    const driftByNode = new Map<string, { warning: number; blocking: number }>();
+    for (const row of driftRows) {
+      const counts = driftByNode.get(row.task_node_id) ?? { warning: 0, blocking: 0 };
+      if (row.severity === "warning") counts.warning += 1;
+      if (row.severity === "blocking" && row.resolution_status === "pending_user_confirmation") counts.blocking += 1;
+      driftByNode.set(row.task_node_id, counts);
+    }
+    const evaluationRows = this.database.all<{
+      task_node_id: string; id: string; execution_attempt_id: string; verdict: string;
+      covered_required_evidence_json: string; missing_required_evidence_json: string; created_at: string;
+    }>(`
+      SELECT e.task_node_id, e.id, e.execution_attempt_id, e.verdict,
+             e.covered_required_evidence_json, e.missing_required_evidence_json, e.created_at
+      FROM evaluations e
+      JOIN task_node_revisions nr ON nr.id = e.task_node_revision_id AND nr.tree_revision_id = ?
+      WHERE e.project_id = ? AND e.tree_id = ?
+      ORDER BY e.task_node_id, e.created_at DESC, e.id DESC
+    `, tree.current_revision_id, projectId, tree.id);
+    const latestEvaluationByNode = new Map<string, typeof evaluationRows[number]>();
+    for (const row of evaluationRows) if (!latestEvaluationByNode.has(row.task_node_id)) latestEvaluationByNode.set(row.task_node_id, row);
+
+    const persistedRelations = this.database.all<{
+      id: string; from_node_id: string; to_node_id: string; kind: string; artifact_id: string | null;
+    }>(`
+      SELECT id, from_node_id, to_node_id, kind, artifact_id
+      FROM task_relation_edges WHERE tree_revision_id = ? ORDER BY id
+    `, tree.current_revision_id);
+    const relationBuckets = new Map<string, typeof persistedRelations>();
+    for (const row of persistedRelations) {
+      const key = this.relationIdentity(row.from_node_id, row.to_node_id, row.kind, row.artifact_id);
+      const bucket = relationBuckets.get(key) ?? [];
+      bucket.push(row);
+      relationBuckets.set(key, bucket);
+    }
+    const normalizedRelations = document.relations.map((relation, index) => {
+      const kind = normalizeRelationKind(relation.kind);
+      const key = this.relationIdentity(relation.fromNodeId, relation.toNodeId, kind, relation.artifactId ?? null);
+      const persisted = relationBuckets.get(key)?.shift();
+      return { relation, kind, relationId: persisted?.id ?? `revision:${tree.current_revision_id}:relation:${index}` };
+    });
+    const dependencyGraph = new Map<string, string[]>();
+    for (const item of normalizedRelations) {
+      if (item.kind !== "depends_on") continue;
+      const targets = dependencyGraph.get(item.relation.fromNodeId) ?? [];
+      targets.push(item.relation.toNodeId);
+      dependencyGraph.set(item.relation.fromNodeId, targets);
+    }
+    const hasPath = (from: string, target: string, visited = new Set<string>()): boolean => {
+      if (from === target) return true;
+      if (visited.has(from)) return false;
+      visited.add(from);
+      return (dependencyGraph.get(from) ?? []).some((next) => hasPath(next, target, visited));
+    };
+    const artifactIds = new Set(document.artifacts.map((artifact) => artifact.id));
+    const artifactLinks = new Set((document.artifactLinks ?? []).map((link) => `${link.taskNodeId}\u0000${link.artifactId}`));
+    const relationViews = normalizedRelations.map(({ relation, kind, relationId }) => {
+      const targetFacts = nodeFacts.get(relation.toNodeId);
+      const artifactRequired = this.relationRequiresArtifact(relation, kind);
+      const sharedMissingSide = kind === "shares_artifact_with" && Boolean(relation.artifactId) &&
+        (!artifactLinks.has(`${relation.fromNodeId}\u0000${relation.artifactId}`) ||
+         !artifactLinks.has(`${relation.toNodeId}\u0000${relation.artifactId}`));
+      const missingArtifact = artifactRequired && (!relation.artifactId || !artifactIds.has(relation.artifactId) || sharedMissingSide);
+      const cycle = kind === "depends_on" && hasPath(relation.toNodeId, relation.fromNodeId);
+      const unconfirmedDependency = kind === "depends_on" && targetFacts?.confirmation_state !== "confirmed";
+      const blockedDependency = kind === "depends_on" && targetFacts?.status !== "succeeded";
+      const status: "active" | "blocked_dependency" | "unconfirmed_dependency" | "missing_artifact" | "cycle" = cycle ? "cycle"
+        : missingArtifact ? "missing_artifact"
+          : unconfirmedDependency ? "unconfirmed_dependency"
+            : blockedDependency ? "blocked_dependency" : "active";
+      const risk: "low" | "medium" | "high" = status === "cycle" || status === "missing_artifact" ? "high"
+        : status === "unconfirmed_dependency" || status === "blocked_dependency" ? "medium" : "low";
+      const direction = selectedNodeId === relation.fromNodeId ? "outgoing"
+        : selectedNodeId === relation.toNodeId ? "incoming" : "unrelated";
+      return {
+        relationId, fromNodeId: relation.fromNodeId, toNodeId: relation.toNodeId, kind,
+        artifactId: relation.artifactId ?? null,
+        dependencyKind: relation.dependencyKind ?? null,
+        coordinationKind: relation.coordinationKind ?? null,
+        description: relation.description ?? null,
+        direction, status, risk,
+        issueCodes: [cycle ? "relation_cycle" : null, missingArtifact ? "relation_artifact_missing" : null,
+          unconfirmedDependency && !cycle ? "dependency_unconfirmed" : null,
+          blockedDependency && !cycle ? "dependency_incomplete" : null].filter((value): value is string => Boolean(value)),
+      };
+    });
+    const relationCountsByNode = new Map<string, { incoming: number; outgoing: number; attention: number }>();
+    for (const relation of relationViews) {
+      const outgoing = relationCountsByNode.get(relation.fromNodeId) ?? { incoming: 0, outgoing: 0, attention: 0 };
+      outgoing.outgoing += 1;
+      if (relation.status !== "active") outgoing.attention += 1;
+      relationCountsByNode.set(relation.fromNodeId, outgoing);
+      const incoming = relationCountsByNode.get(relation.toNodeId) ?? { incoming: 0, outgoing: 0, attention: 0 };
+      incoming.incoming += 1;
+      if (relation.status !== "active") incoming.attention += 1;
+      relationCountsByNode.set(relation.toNodeId, incoming);
+    }
+    const nodeViews = document.nodes.map((node) => {
+      const facts = nodeFacts.get(node.id);
+      const nodeArtifacts = artifactsByNode.get(node.id) ?? [];
+      const drift = driftByNode.get(node.id) ?? { warning: 0, blocking: 0 };
+      const evaluation = latestEvaluationByNode.get(node.id);
+      const covered = evaluation ? JSON.parse(evaluation.covered_required_evidence_json) as string[] : [];
+      const missing = evaluation ? JSON.parse(evaluation.missing_required_evidence_json) as string[] : (node.requiredEvidence ?? []).map((item) => item.key);
+      return {
+        nodeId: node.id, nodeRevisionId: facts?.node_revision_id ?? null, parentId: node.parentId,
+        title: node.title, childIds: node.children, status: facts?.status ?? "draft",
+        executionPhase: node.executionPhase ?? null, confirmationState: facts?.confirmation_state ?? "draft",
+        warningDriftCount: drift.warning, blockingDriftCount: drift.blocking,
+        artifactCounts: {
+          total: nodeArtifacts.length,
+          planned: nodeArtifacts.filter((item) => item.confidence === "planned").length,
+          actual: nodeArtifacts.filter((item) => item.confidence !== "planned").length,
+        },
+        relationCounts: relationCountsByNode.get(node.id) ?? { incoming: 0, outgoing: 0, attention: 0 },
+        latestEvaluation: evaluation ? {
+          evaluationId: evaluation.id, attemptId: evaluation.execution_attempt_id, verdict: evaluation.verdict,
+          evidenceCoverage: { covered: covered.length, required: node.requiredEvidence?.length ?? 0, missing: missing.length },
+          createdAt: evaluation.created_at,
+        } : null,
+      };
+    }).filter((node) => !query.nodeStatuses?.length || query.nodeStatuses.includes(node.status));
+
+    let visibleRelations = query.depth === "snapshot"
+      ? relationViews.filter((relation) => relation.status !== "active")
+      : query.depth === "detail" && query.includeRelationOverlay === true
+        ? relationViews
+        : relationViews.filter((relation) => relation.fromNodeId === selectedNodeId || relation.toNodeId === selectedNodeId);
+    if (query.branchRootNodeId) {
+      const scope = this.branchNodeIds(document, query.branchRootNodeId);
+      visibleRelations = visibleRelations.filter((relation) => scope.has(relation.fromNodeId) && scope.has(relation.toNodeId));
+    }
+    if (query.relationKinds?.length) visibleRelations = visibleRelations.filter((relation) => query.relationKinds!.includes(relation.kind));
+    if (query.direction) visibleRelations = visibleRelations.filter((relation) => relation.direction === query.direction);
+    if (query.relationStatuses?.length) visibleRelations = visibleRelations.filter((relation) => query.relationStatuses!.includes(relation.status));
+    if (query.risks?.length) visibleRelations = visibleRelations.filter((relation) => query.risks!.includes(relation.risk));
+    if (query.nodeStatuses?.length) visibleRelations = visibleRelations.filter((relation) => {
+      const fromStatus = nodeFacts.get(relation.fromNodeId)?.status ?? "draft";
+      const toStatus = nodeFacts.get(relation.toNodeId)?.status ?? "draft";
+      return query.nodeStatuses!.includes(fromStatus) || query.nodeStatuses!.includes(toStatus);
+    });
+    if (query.artifactId) visibleRelations = visibleRelations.filter((relation) => relation.artifactId === query.artifactId);
+    const selectedArtifacts = selectedNodeId ? artifactsByNode.get(selectedNodeId) ?? [] : [];
+    const traceCount = selectedNodeId ? this.database.get<{ count: number }>(
+      "SELECT count(*) AS count FROM trace_events WHERE project_id = ? AND tree_id = ? AND node_id = ?",
+      projectId, tree.id, selectedNodeId,
+    )?.count ?? 0 : 0;
+    const failureCaseIds = selectedNodeId ? this.database.all<{ id: string }>(`
+      SELECT id FROM failure_cases WHERE project_id = ? AND tree_id = ? AND source_task_node_id = ?
+      ORDER BY created_at DESC, id DESC
+    `, projectId, tree.id, selectedNodeId).map((row) => row.id) : [];
+    return {
+      projectId, treeId: tree.id, treeRevisionId: tree.current_revision_id, revision: revision.revision,
+      title: tree.title, status: tree.status, depth: query.depth, selectedNodeId,
+      relationOverlay: query.depth === "detail" && query.includeRelationOverlay === true,
+      nodes: nodeViews, relations: visibleRelations,
+      selectedNodeContext: selectedNodeId ? {
+        nodeId: selectedNodeId,
+        artifactIds: [...new Set(selectedArtifacts.map((item) => item.artifactId))],
+        traceCount, failureCaseIds,
+        relationCounts: relationCountsByNode.get(selectedNodeId) ?? { incoming: 0, outgoing: 0, attention: 0 },
+      } : null,
     };
   }
 
@@ -1082,6 +1318,29 @@ export class RuntimeQueryService {
       status: row.status, errorSummary: row.error_summary,
       createdAt: row.created_at, completedAt: row.completed_at,
     };
+  }
+
+  private relationIdentity(fromNodeId: string, toNodeId: string, kind: string, artifactId: string | null): string {
+    return [fromNodeId, toNodeId, normalizeRelationKind(kind as TaskRelationInput["kind"]), artifactId ?? ""].join("\u0000");
+  }
+
+  private relationRequiresArtifact(relation: TaskRelationInput, kind: CanonicalRelationKind): boolean {
+    if (["calls", "exchanges_data_with", "shares_artifact_with"].includes(kind)) return true;
+    if (kind === "depends_on") return relation.dependencyKind !== undefined && relation.dependencyKind !== "execution_order";
+    if (kind === "coordinates_with") return relation.coordinationKind !== "schedule_only";
+    return false;
+  }
+
+  private branchNodeIds(document: TaskTreeDocument, rootNodeId: string): Set<string> {
+    const byId = new Map(document.nodes.map((node) => [node.id, node]));
+    const result = new Set<string>();
+    const visit = (nodeId: string) => {
+      if (result.has(nodeId)) return;
+      result.add(nodeId);
+      for (const childId of byId.get(nodeId)?.children ?? []) visit(childId);
+    };
+    visit(rootNodeId);
+    return result;
   }
 
   private requireProject(projectId: string): void {

@@ -24,6 +24,7 @@ describe("Harness MCP binding", () => {
       "harness_apply_draft_change_set", "harness_confirm_scope", "harness_create_confirmation_prompt",
       "harness_create_task_root", "harness_get_runtime_snapshot", "harness_get_task_node_detail",
       "harness_get_task_tree_summary", "harness_get_trace_events", "harness_list_task_tree_candidates",
+      "harness_get_tree_view",
       "harness_select_task_tree", "harness_archive_task_tree", "harness_restore_task_tree",
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
@@ -62,6 +63,13 @@ describe("Harness MCP binding", () => {
     });
     expect(tools.find((tool) => tool.name === "harness_get_task_node_detail")?.inputSchema).toMatchObject({
       properties: { childLimit: { type: "integer" }, childCursor: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_get_tree_view")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["treeId", "depth"]),
+      properties: {
+        depth: { enum: ["snapshot", "summary", "detail"] }, includeRelationOverlay: { type: "boolean" },
+        relationKinds: { type: "array" }, relationStatuses: { type: "array" }, risks: { type: "array" },
+      },
     });
     expect(tools.find((tool) => tool.name === "harness_get_trace_events")?.inputSchema).toMatchObject({
       properties: { runId: { type: "string" } },
@@ -131,6 +139,13 @@ describe("Harness MCP binding", () => {
     expect(driftValue.items).toHaveLength(1);
     const graph = await client.callTool({ name: "harness_get_artifact_graph", arguments: { cwd: project, treeId: createdValue.treeId } });
     expect(graph.isError).not.toBe(true);
+    const treeView = await client.callTool({
+      name: "harness_get_tree_view", arguments: { cwd: project, treeId: createdValue.treeId, depth: "snapshot" },
+    });
+    expect(treeView.isError).not.toBe(true);
+    const treeViewContent = (treeView as { content: Array<{ type: string; text?: string }> }).content;
+    expect(JSON.parse(treeViewContent[0]?.type === "text" ? treeViewContent[0].text ?? "null" : "null"))
+      .toMatchObject({ treeId: createdValue.treeId, depth: "snapshot", relationOverlay: false });
     expect((await client.callTool({ name: "harness_get_waiting_items", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_failure_cases", arguments: { cwd: project } })).isError).not.toBe(true);

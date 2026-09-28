@@ -305,6 +305,29 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     inputSchema: { cwd: cwdSchema, treeId: z.string() },
   }, ({ cwd, treeId }) => guarded(async () => runtime.queries.getTaskTreeSummary((await existingProject(cwd)).projectId, treeId)));
 
+  server.registerTool("harness_get_tree_view", {
+    description: "Get a project-scoped Tree-centered Snapshot, selected-node Summary, or explicit filtered Relation Overlay Detail.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().min(1), depth: z.enum(["snapshot", "summary", "detail"]),
+      selectedNodeId: z.string().min(1).optional(), includeRelationOverlay: z.boolean().optional(),
+      relationKinds: z.array(z.enum(["depends_on", "calls", "exchanges_data_with", "shares_artifact_with", "coordinates_with"])).optional(),
+      direction: z.enum(["incoming", "outgoing"]).optional(), branchRootNodeId: z.string().min(1).optional(),
+      relationStatuses: z.array(z.enum(["active", "blocked_dependency", "unconfirmed_dependency", "missing_artifact", "cycle"])).optional(),
+      risks: z.array(z.enum(["low", "medium", "high"])).optional(), nodeStatuses: z.array(z.string().min(1)).optional(),
+      artifactId: z.string().min(1).optional(),
+    },
+  }, ({ cwd, treeId, depth, selectedNodeId, includeRelationOverlay, relationKinds, direction, branchRootNodeId, relationStatuses, risks, nodeStatuses, artifactId }) => guarded(async () => runtime.queries.getTreeView(
+    (await existingProject(cwd)).projectId,
+    {
+      treeId, depth,
+      ...(selectedNodeId ? { selectedNodeId } : {}),
+      ...(includeRelationOverlay !== undefined ? { includeRelationOverlay } : {}),
+      ...(relationKinds ? { relationKinds } : {}), ...(direction ? { direction } : {}),
+      ...(branchRootNodeId ? { branchRootNodeId } : {}), ...(relationStatuses ? { relationStatuses } : {}),
+      ...(risks ? { risks } : {}), ...(nodeStatuses ? { nodeStatuses } : {}), ...(artifactId ? { artifactId } : {}),
+    },
+  )));
+
   server.registerTool("harness_get_task_refinement_history", {
     description: "Get bounded, revision-linked Task Tree refinement Decision Records for the current project.",
     inputSchema: {

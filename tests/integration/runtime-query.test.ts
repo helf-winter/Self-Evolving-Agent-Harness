@@ -43,6 +43,108 @@ async function fixture() {
 afterEach(async () => Promise.all(dirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))));
 
 describe("RuntimeQueryService", () => {
+  it("returns progressive Tree-centered views and only exposes a global Relation Overlay explicitly", async () => {
+    const { database, service, tree: foreignTree } = await fixture();
+    const trees = new TaskTreeService(database);
+    const root = await trees.createTaskRoot({ projectId: "p1", title: "Tree view" });
+    const revision = trees.saveDraftRevision({
+      projectId: "p1", treeId: root.treeId, baseRevisionId: root.revisionId,
+      document: {
+        nodes: [
+          { id: "view-root", parentId: null, title: "Tree view", children: ["provider", "consumer"] },
+          {
+            id: "provider", parentId: "view-root", title: "Provider", children: [], objectives: ["Provide API"],
+            expectedOutputs: ["src/provider.ts"], acceptanceCriteria: ["provider test passes"], unresolvedQuestions: [],
+            unresolvedDecisions: [], dependencies: [], requiredEvidence: [{ key: "provider-test", description: "provider test" }],
+            executionPhase: "implementation", stopDecompositionReason: "one provider output",
+          },
+          {
+            id: "consumer", parentId: "view-root", title: "Consumer", children: [], objectives: ["Consume API"],
+            expectedOutputs: ["src/consumer.ts"], acceptanceCriteria: ["consumer test passes"], unresolvedQuestions: [],
+            unresolvedDecisions: [], dependencies: ["provider"], requiredEvidence: [{ key: "consumer-test", description: "consumer test" }],
+            executionPhase: "verification", stopDecompositionReason: "one consumer output",
+          },
+        ],
+        relations: [
+          { fromNodeId: "consumer", toNodeId: "provider", kind: "calls", artifactId: "api" },
+          { fromNodeId: "consumer", toNodeId: "provider", kind: "depends_on", dependencyKind: "execution_order" },
+          { fromNodeId: "provider", toNodeId: "consumer", kind: "depends_on", dependencyKind: "execution_order" },
+          { fromNodeId: "view-root", toNodeId: "provider", kind: "coordinates_with", coordinationKind: "schedule_only" },
+        ],
+        artifacts: [{ id: "api", kind: "contract", locator: "tree-view-api", status: "planned" }],
+        artifactLinks: [
+          { taskNodeId: "provider", artifactId: "api", relationType: "implements" },
+          { taskNodeId: "consumer", artifactId: "api", relationType: "consumes" },
+        ],
+      },
+    });
+    database.run("UPDATE task_nodes SET status = 'failed' WHERE id = 'provider'");
+    database.run("UPDATE task_nodes SET status = 'blocked' WHERE id = 'consumer'");
+    database.run("UPDATE task_node_confirmation_states SET state = 'confirmed' WHERE tree_revision_id = ? AND task_node_id = 'provider'", revision.revisionId);
+    database.run("UPDATE task_node_confirmation_states SET state = 'pending_user_confirmation' WHERE tree_revision_id = ? AND task_node_id = 'consumer'", revision.revisionId);
+    const providerRevision = database.get<{ id: string }>(
+      "SELECT id FROM task_node_revisions WHERE tree_revision_id = ? AND node_id = 'provider'", revision.revisionId,
+    )!.id;
+    database.run("INSERT INTO execution_attempts (id, project_id, tree_id, task_node_id, task_node_revision_id, attempt_number, status, started_at, completed_at) VALUES ('view-attempt', 'p1', ?, 'provider', ?, 1, 'failed', '2031-01-01', '2031-01-02')", root.treeId, providerRevision);
+    database.run("INSERT INTO evaluations (id, project_id, tree_id, task_node_id, task_node_revision_id, execution_attempt_id, verdict, evidence_refs_json, covered_required_evidence_json, missing_required_evidence_json, risk_summary, created_at) VALUES ('view-evaluation', 'p1', ?, 'provider', ?, 'view-attempt', 'failed', '[\"e1\"]', '[\"provider-test\"]', '[]', 'provider failed', '2031-01-02')", root.treeId, providerRevision);
+    new PlanDriftService(database).recordDrift({
+      projectId: "p1", treeId: root.treeId, nodeId: "consumer", driftType: "relation_changed", severity: "warning",
+      description: "Consumer call changed", explanation: "Observed call differs from the planned contract",
+    });
+
+    const snapshot = service.getTreeView("p1", { treeId: root.treeId, depth: "snapshot" });
+    const summary = service.getTreeView("p1", { treeId: root.treeId, depth: "summary", selectedNodeId: "consumer" });
+    const detailWithoutOverlay = service.getTreeView("p1", { treeId: root.treeId, depth: "detail", selectedNodeId: "consumer" });
+    const overlay = service.getTreeView("p1", {
+      treeId: root.treeId, depth: "detail", selectedNodeId: "consumer", includeRelationOverlay: true,
+    });
+    const calls = service.getTreeView("p1", {
+      treeId: root.treeId, depth: "detail", selectedNodeId: "consumer", includeRelationOverlay: true,
+      relationKinds: ["calls"], direction: "outgoing", artifactId: "api",
+    });
+    const cycles = service.getTreeView("p1", {
+      treeId: root.treeId, depth: "detail", includeRelationOverlay: true,
+      relationStatuses: ["cycle"], risks: ["high"],
+    });
+    const captureError = (operation: () => unknown) => {
+      try { operation(); return null; } catch (error) { return error; }
+    };
+    const foreignTreeError = captureError(() => service.getTreeView("p2", { treeId: root.treeId, depth: "snapshot" }));
+    const foreignNodeError = captureError(() => service.getTreeView("p1", {
+      treeId: root.treeId, depth: "summary", selectedNodeId: foreignTree.document.nodes[0]!.id,
+    }));
+    database.close();
+
+    expect(snapshot).toMatchObject({ depth: "snapshot", relationOverlay: false });
+    expect(snapshot.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        nodeId: "provider", status: "failed", executionPhase: "implementation", confirmationState: "confirmed",
+        artifactCounts: { total: 1, planned: 1, actual: 0 },
+        latestEvaluation: expect.objectContaining({
+          evaluationId: "view-evaluation", verdict: "failed",
+          evidenceCoverage: { covered: 1, required: 1, missing: 0 },
+        }),
+      }),
+      expect.objectContaining({ nodeId: "consumer", warningDriftCount: 1, confirmationState: "pending_user_confirmation" }),
+    ]));
+    expect(snapshot.relations).toHaveLength(2);
+    expect(snapshot.relations.every((relation) => relation.status === "cycle" && relation.risk === "high")).toBe(true);
+    expect(summary.relationOverlay).toBe(false);
+    expect(summary.relations).toHaveLength(3);
+    expect(summary.selectedNodeContext).toMatchObject({
+      nodeId: "consumer", artifactIds: ["api"], traceCount: 1,
+      relationCounts: { incoming: 1, outgoing: 2, attention: 2 },
+    });
+    expect(detailWithoutOverlay.relations).toHaveLength(3);
+    expect(detailWithoutOverlay.relationOverlay).toBe(false);
+    expect(overlay.relationOverlay).toBe(true);
+    expect(overlay.relations).toHaveLength(4);
+    expect(calls.relations).toEqual([expect.objectContaining({ kind: "calls", direction: "outgoing", artifactId: "api" })]);
+    expect(cycles.relations).toHaveLength(2);
+    expect(foreignTreeError).toEqual(expect.objectContaining({ code: "not_found" }));
+    expect(foreignNodeError).toEqual(expect.objectContaining({ code: "not_found" }));
+  });
+
   it("returns a compact Snapshot and richer Summary", async () => {
     const { database, tree, service } = await fixture();
     expect(service.getRuntimeSnapshot("p1")).toMatchObject({
