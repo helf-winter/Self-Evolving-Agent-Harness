@@ -7,6 +7,7 @@ import type { RuntimeDatabase } from "../storage/database.js";
 
 interface ExecutableNodeRow {
   node_id: string;
+  parent_id: string | null;
   tree_id: string;
   node_status: string;
   current_revision_id: string;
@@ -14,6 +15,7 @@ interface ExecutableNodeRow {
   body_json: string;
   workflow_stage: WorkflowStage;
   confirmation_state: string;
+  active_branch_node_id: string | null;
 }
 
 interface AttemptRow {
@@ -89,6 +91,7 @@ export class NodeExecutionService {
       if (stagePhase[node.workflow_stage] !== body.executionPhase) {
         throw new HarnessError("attempt_not_executable", `Task Node phase ${body.executionPhase ?? "undefined"} is not allowed during ${node.workflow_stage}`);
       }
+      this.requireWorkflowScope(node);
       this.requireSucceededDependencies(node.tree_id, body.dependencies ?? []);
       if (body.executionPhase === "verification") {
         this.requireSucceededCurrentChildren(node.tree_id, node.node_id);
@@ -158,9 +161,9 @@ export class NodeExecutionService {
 
   private requireExecutableNode(projectId: string, nodeId: string): ExecutableNodeRow {
     const row = this.database.get<ExecutableNodeRow>(`
-      SELECT n.id AS node_id, n.tree_id, n.status AS node_status,
+      SELECT n.id AS node_id, n.parent_id, n.tree_id, n.status AS node_status,
              t.current_revision_id, nr.id AS node_revision_id, nr.body_json,
-             w.stage AS workflow_stage, cs.state AS confirmation_state
+             w.stage AS workflow_stage, cs.state AS confirmation_state, w.active_branch_node_id
       FROM task_nodes n
       JOIN task_trees t ON t.id = n.tree_id
       JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = t.current_revision_id
@@ -170,6 +173,34 @@ export class NodeExecutionService {
     `, nodeId, projectId);
     if (!row) throw new HarnessError("not_found", "current Task Node revision was not found in this Project");
     return row;
+  }
+
+  private requireWorkflowScope(node: ExecutableNodeRow): void {
+    if (node.workflow_stage === "root_verification") {
+      if (node.parent_id !== null) {
+        throw new HarnessError("attempt_not_executable", "root_verification only permits the Task Tree root node");
+      }
+      return;
+    }
+    if (node.workflow_stage !== "branch_implementation" && node.workflow_stage !== "branch_verification") return;
+    if (!node.active_branch_node_id) {
+      const managedBranchCount = this.database.get<{ count: number }>(`
+        SELECT count(*) AS count FROM workflow_branch_states b
+        JOIN task_trees t ON t.current_revision_id = b.tree_revision_id
+        WHERE b.tree_id = ?
+      `, node.tree_id)?.count ?? 0;
+      if (managedBranchCount === 0) return;
+      throw new HarnessError("attempt_not_executable", "the Workflow has no active branch");
+    }
+    const inBranch = this.database.get<{ found: number }>(`
+      WITH RECURSIVE branch_nodes(id) AS (
+        SELECT id FROM task_nodes WHERE id = ? AND tree_id = ?
+        UNION ALL
+        SELECT n.id FROM task_nodes n JOIN branch_nodes b ON n.parent_id = b.id WHERE n.tree_id = ?
+      )
+      SELECT 1 AS found FROM branch_nodes WHERE id = ? LIMIT 1
+    `, node.active_branch_node_id, node.tree_id, node.tree_id, node.node_id);
+    if (!inBranch) throw new HarnessError("attempt_not_executable", "Task Node is outside the active Workflow branch");
   }
 
   private requireSucceededDependencies(treeId: string, dependencyIds: string[]): void {

@@ -65,6 +65,19 @@ describe("NodeExecutionService", () => {
     database.close();
   });
 
+  it("permits implementation only inside the Runtime-managed active branch", async () => {
+    const { database, service } = await fixture();
+    database.run("INSERT INTO workflow_branch_states (project_id, tree_id, tree_revision_id, branch_node_id, branch_order, status, updated_at) VALUES ('p1', 't1', 'tr1', 'n1', 0, 'active', 'now')");
+    database.run("UPDATE workflow_states SET active_branch_node_id = 'n1' WHERE id = 'w1'");
+    database.run("UPDATE task_nodes SET status = 'ready' WHERE id = 'dep'");
+    expect(() => service.startAttempt({ projectId: "p1", nodeId: "dep", expectedTreeRevisionId: "tr1" }))
+      .toThrow(expect.objectContaining({ code: "attempt_not_executable", message: expect.stringContaining("outside") }));
+    database.run("UPDATE task_nodes SET status = 'succeeded' WHERE id = 'dep'");
+    expect(service.startAttempt({ projectId: "p1", nodeId: "n1", expectedTreeRevisionId: "tr1" }))
+      .toMatchObject({ nodeId: "n1", status: "running" });
+    database.close();
+  });
+
   it("blocks a parent verification Attempt until every current direct child succeeds", async () => {
     const { database, service } = await fixture();
     database.run("UPDATE task_nodes SET status = 'ready' WHERE id = 'dep'");

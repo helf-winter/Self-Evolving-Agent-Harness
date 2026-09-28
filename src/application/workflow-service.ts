@@ -232,6 +232,16 @@ export class WorkflowService {
     if (input.to === "skeleton_gate" || workflow.stage === "skeleton_gate") {
       throw new HarnessError("workflow_transition_rejected", "use the deterministic Skeleton Gate evaluation instead of manually changing the Gate stage");
     }
+    if (["branch_implementation", "branch_verification", "root_verification"].includes(workflow.stage)) {
+      const current = this.database.get<{ document_json: string }>(`
+        SELECT r.document_json FROM task_trees t JOIN task_tree_revisions r ON r.id = t.current_revision_id
+        WHERE t.id = ? AND t.project_id = ?
+      `, input.treeId, input.projectId);
+      const structured = current && (JSON.parse(current.document_json) as TaskTreeDocument).planningVersion === 1;
+      if (structured) {
+        throw new HarnessError("workflow_transition_rejected", "use deterministic Workflow Phase evaluation instead of manually changing an execution stage");
+      }
+    }
     const evidence: { confirmationId?: string; skeletonGateEvidenceId?: string } = {};
     if (input.confirmationId) evidence.confirmationId = input.confirmationId;
     if (input.skeletonGateEvidenceId) evidence.skeletonGateEvidenceId = input.skeletonGateEvidenceId;

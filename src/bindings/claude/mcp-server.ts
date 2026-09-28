@@ -408,6 +408,21 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     ...(childLimit ? { childLimit } : {}), ...(childCursor ? { childCursor } : {}),
   })));
 
+  server.registerTool("harness_evaluate_workflow_phase", {
+    description: "Evaluate current-revision completion of the active implementation, branch-verification, or root-verification phase and advance only when its deterministic gate passes.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1), workflowRevision: z.number().int().min(0) },
+  }, ({ cwd, treeId, workflowRevision }) => guarded(async () => runtime.workflowPhases.evaluate({
+    projectId: (await existingProject(cwd)).projectId, treeId, workflowRevision,
+  })));
+
+  server.registerTool("harness_get_workflow_phase_results", {
+    description: "List immutable branch/root phase gate results for the current Project.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1).optional(), resultId: z.string().min(1).optional() },
+  }, ({ cwd, treeId, resultId }) => guarded(async () => runtime.workflowPhases.list(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(resultId ? { resultId } : {}) },
+  )));
+
   server.registerTool("harness_get_trace_events", {
     description: "Get paginated redacted Trace facts and Execution Context snapshots for the current project.",
     inputSchema: { cwd: cwdSchema, treeId: z.string().optional(), nodeId: z.string().optional(), runId: z.string().optional(), limit: z.number().int().min(1).max(200).optional(), cursor: z.string().optional() },

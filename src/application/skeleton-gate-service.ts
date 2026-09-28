@@ -172,16 +172,26 @@ export class SkeletonGateService {
     structured ? "skeleton-gate-v1" : "skeleton-gate-legacy-v1", evaluated.status,
     canonicalJson(branches), canonicalJson(evaluated.blockers), canonicalJson(attemptIds), canonicalJson(traceIds), createdAt);
     if (evaluated.status === "passed") {
+      confirmedBranches.forEach((branchNodeId, index) => this.database.run(`
+        INSERT INTO workflow_branch_states (
+          project_id, tree_id, tree_revision_id, branch_node_id, branch_order, status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, input.projectId, input.treeId, tree.current_revision_id, branchNodeId, index,
+      index === 0 ? "active" : "pending", createdAt));
       this.database.run(
-        "UPDATE workflow_states SET stage = 'branch_implementation', revision = revision + 1, updated_at = ? WHERE id = ?",
-        createdAt, workflow.id,
+        "UPDATE workflow_states SET stage = 'branch_implementation', active_branch_node_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?",
+        confirmedBranches[0] ?? null, createdAt, workflow.id,
       );
     }
     return {
       resultId, projectId: input.projectId, treeId: input.treeId, treeRevisionId: tree.current_revision_id,
       workflowRevision: workflow.revision, policyVersion: structured ? "skeleton-gate-v1" : "skeleton-gate-legacy-v1",
       status: evaluated.status, branches, blockers: evaluated.blockers, attemptIds, evidenceTraceIds: traceIds,
-      workflow: { stage: evaluated.status === "passed" ? "branch_implementation" : "skeleton_pass", revision: workflow.revision + (evaluated.status === "passed" ? 1 : 0) },
+      workflow: {
+        stage: evaluated.status === "passed" ? "branch_implementation" : "skeleton_pass",
+        revision: workflow.revision + (evaluated.status === "passed" ? 1 : 0),
+        activeBranchNodeId: evaluated.status === "passed" ? confirmedBranches[0] ?? null : null,
+      },
       createdAt,
     };
   }

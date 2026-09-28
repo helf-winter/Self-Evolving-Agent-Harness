@@ -103,8 +103,8 @@ export class RuntimeQueryService {
     const state = this.database.get<{ selected_tree_id: string | null; selected_node_id: string | null }>(
       "SELECT selected_tree_id, selected_node_id FROM runtime_states WHERE project_id = ?", projectId,
     );
-    const workflow = this.database.get<{ tree_id: string; stage: string; revision: number }>(
-      "SELECT tree_id, stage, revision FROM workflow_states WHERE project_id = ? AND active = 1", projectId,
+    const workflow = this.database.get<{ tree_id: string; stage: string; revision: number; active_branch_node_id: string | null }>(
+      "SELECT tree_id, stage, revision, active_branch_node_id FROM workflow_states WHERE project_id = ? AND active = 1", projectId,
     );
     const confirmation = this.database.get<{ id: string; scope_id: string; prompt: string }>(
       "SELECT id, scope_id, prompt FROM runtime_confirmation_prompts WHERE project_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1", projectId,
@@ -133,11 +133,27 @@ export class RuntimeQueryService {
           ORDER BY created_at DESC, id DESC LIMIT 1
         `, projectId, workflow.tree_id)
       : undefined;
+    const latestWorkflowPhaseGate = workflow
+      ? this.database.get<{ id: string; stage: string; status: string; blocker_codes_json: string; created_at: string }>(`
+          SELECT id, stage, status, blocker_codes_json, created_at FROM workflow_phase_gate_results
+          WHERE project_id = ? AND tree_id = ? ORDER BY created_at DESC, id DESC LIMIT 1
+        `, projectId, workflow.tree_id)
+      : undefined;
+    const workflowBranches = workflow
+      ? this.database.all<{ branch_node_id: string; branch_order: number; status: string }>(`
+          SELECT b.branch_node_id, b.branch_order, b.status FROM workflow_branch_states b
+          JOIN task_trees t ON t.current_revision_id = b.tree_revision_id
+          WHERE b.project_id = ? AND b.tree_id = ? ORDER BY b.branch_order
+        `, projectId, workflow.tree_id)
+      : [];
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
       selectedNodeId: state?.selected_node_id ?? null,
-      workflow: workflow ? { treeId: workflow.tree_id, stage: workflow.stage, revision: workflow.revision } : null,
+      workflow: workflow ? {
+        treeId: workflow.tree_id, stage: workflow.stage, revision: workflow.revision,
+        activeBranchNodeId: workflow.active_branch_node_id,
+      } : null,
       pendingConfirmation: confirmation ? { confirmationId: confirmation.id, scopeId: confirmation.scope_id, prompt: confirmation.prompt } : null,
       pendingConfirmationCount,
       pendingAffiliationCount,
@@ -152,6 +168,15 @@ export class RuntimeQueryService {
         blockerCount: (JSON.parse(latestSkeletonGate.blockers_json) as unknown[]).length,
         createdAt: latestSkeletonGate.created_at,
       } : null,
+      latestWorkflowPhaseGate: latestWorkflowPhaseGate ? {
+        resultId: latestWorkflowPhaseGate.id, stage: latestWorkflowPhaseGate.stage,
+        status: latestWorkflowPhaseGate.status,
+        blockerCount: (JSON.parse(latestWorkflowPhaseGate.blocker_codes_json) as unknown[]).length,
+        createdAt: latestWorkflowPhaseGate.created_at,
+      } : null,
+      workflowBranches: workflowBranches.map((branch) => ({
+        branchNodeId: branch.branch_node_id, order: branch.branch_order, status: branch.status,
+      })),
       availableActions: this.availableActions(workflow?.stage, pendingAffiliationCount > 0),
     };
   }
@@ -1632,6 +1657,8 @@ export class RuntimeQueryService {
           ? ["confirm_scope", "refine_tree"]
           : stage === "skeleton_pass"
             ? ["execute_skeleton", "evaluate_skeleton_gate", "inspect_detail"]
+            : stage === "branch_implementation" || stage === "branch_verification" || stage === "root_verification"
+              ? ["execute_phase_nodes", "evaluate_workflow_phase", "inspect_detail", "record_evidence"]
             : ["inspect_detail", "record_evidence"];
     return pendingAffiliation
       ? ["resolve_task_affiliation", "inspect_task_affiliations", ...stageActions]

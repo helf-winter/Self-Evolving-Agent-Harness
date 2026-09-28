@@ -15,8 +15,8 @@ const document = {
     unresolvedQuestions: [], unresolvedDecisions: [], plannedEffects: [],
   },
   nodes: [
-    { id: "root", parentId: null, title: "Build API", children: ["api"] },
-    { id: "api", parentId: "root", title: "API", children: ["api-skeleton", "api-implementation"] },
+    { id: "root", parentId: null, title: "Build API", children: ["api"], executionPhase: "verification" as const, requiredEvidence: [{ key: "root-test", description: "root integration passes" }] },
+    { id: "api", parentId: "root", title: "API", children: ["api-skeleton", "api-implementation"], executionPhase: "verification" as const, requiredEvidence: [{ key: "branch-test", description: "branch integration passes" }] },
     {
       id: "api-skeleton", parentId: "api", title: "Wire API", children: [], objectives: ["Wire API skeleton"],
       expectedOutputs: ["src/api.ts"], acceptanceCriteria: ["API compiles"], unresolvedQuestions: [], unresolvedDecisions: [],
@@ -120,14 +120,62 @@ describe("SkeletonGateService", () => {
       attemptIds: [attempt.attemptId], evidenceTraceIds: expect.arrayContaining([write.eventId, build.eventId]),
     });
     expect(fixture.runtime.queries.getRuntimeSnapshot(fixture.project.projectId)).toMatchObject({
-      workflow: { stage: "branch_implementation", revision: 5 },
+      workflow: { stage: "branch_implementation", revision: 5, activeBranchNodeId: "api" },
       latestSkeletonGate: { resultId: passed.resultId, status: "passed", blockerCount: 0 },
+      workflowBranches: [{ branchNodeId: "api", order: 0, status: "active" }],
     });
+    expect(() => fixture.runtime.workflows.transition({
+      projectId: fixture.project.projectId, treeId: fixture.root.treeId, workflowRevision: 5, to: "branch_verification",
+    })).toThrow(expect.objectContaining({ code: "workflow_transition_rejected" }));
+
+    const incompleteImplementation = fixture.runtime.workflowPhases.evaluate({
+      projectId: fixture.project.projectId, treeId: fixture.root.treeId, workflowRevision: 5,
+    });
+    expect(incompleteImplementation).toMatchObject({ status: "failed", incompleteNodeIds: ["api-implementation"], nextStage: "branch_implementation" });
+    const implementation = fixture.runtime.executions.startAttempt({
+      projectId: fixture.project.projectId, nodeId: "api-implementation", expectedTreeRevisionId: fixture.revision.revisionId,
+    });
+    const implementationTrace = await fixture.runtime.hooks.ingest(mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "gate-run", cwd: fixture.projectDir, tool_name: "Bash", tool_use_id: "api-test",
+      tool_input: { command: "npm test -- api" }, tool_response: { exitCode: 0 },
+    }));
+    if (!implementationTrace.recorded) throw new Error("implementation trace was not recorded");
+    fixture.runtime.executions.attachEvidence({ projectId: fixture.project.projectId, attemptId: implementation.attemptId, requiredEvidenceKey: "api-test", traceEventId: implementationTrace.eventId });
+    fixture.runtime.executions.beginVerification({ projectId: fixture.project.projectId, attemptId: implementation.attemptId, expectedStatus: "running" });
+    fixture.runtime.evaluations.evaluateAttempt({ projectId: fixture.project.projectId, attemptId: implementation.attemptId, proposedVerdict: "succeeded", riskSummary: null });
+    expect(fixture.runtime.workflowPhases.evaluate({ projectId: fixture.project.projectId, treeId: fixture.root.treeId, workflowRevision: 5 }))
+      .toMatchObject({ status: "passed", nextStage: "branch_verification", nextBranchNodeId: "api", workflow: { revision: 6 } });
+
+    const branchAttempt = fixture.runtime.executions.startAttempt({ projectId: fixture.project.projectId, nodeId: "api", expectedTreeRevisionId: fixture.revision.revisionId });
+    const branchTrace = await fixture.runtime.hooks.ingest(mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "gate-run", cwd: fixture.projectDir, tool_name: "Bash", tool_use_id: "branch-test",
+      tool_input: { command: "npm test -- branch" }, tool_response: { exitCode: 0 },
+    }));
+    if (!branchTrace.recorded) throw new Error("branch trace was not recorded");
+    fixture.runtime.executions.attachEvidence({ projectId: fixture.project.projectId, attemptId: branchAttempt.attemptId, requiredEvidenceKey: "branch-test", traceEventId: branchTrace.eventId });
+    fixture.runtime.executions.beginVerification({ projectId: fixture.project.projectId, attemptId: branchAttempt.attemptId, expectedStatus: "running" });
+    fixture.runtime.evaluations.evaluateAttempt({ projectId: fixture.project.projectId, attemptId: branchAttempt.attemptId, proposedVerdict: "succeeded", riskSummary: null });
+    expect(fixture.runtime.workflowPhases.evaluate({ projectId: fixture.project.projectId, treeId: fixture.root.treeId, workflowRevision: 6 }))
+      .toMatchObject({ status: "passed", nextStage: "root_verification", nextBranchNodeId: null, workflow: { revision: 7 } });
+
+    const rootAttempt = fixture.runtime.executions.startAttempt({ projectId: fixture.project.projectId, nodeId: "root", expectedTreeRevisionId: fixture.revision.revisionId });
+    const rootTrace = await fixture.runtime.hooks.ingest(mapClaudeHook({
+      hook_event_name: "PostToolUse", session_id: "gate-run", cwd: fixture.projectDir, tool_name: "Bash", tool_use_id: "root-test",
+      tool_input: { command: "npm test -- integration" }, tool_response: { exitCode: 0 },
+    }));
+    if (!rootTrace.recorded) throw new Error("root trace was not recorded");
+    fixture.runtime.executions.attachEvidence({ projectId: fixture.project.projectId, attemptId: rootAttempt.attemptId, requiredEvidenceKey: "root-test", traceEventId: rootTrace.eventId });
+    fixture.runtime.executions.beginVerification({ projectId: fixture.project.projectId, attemptId: rootAttempt.attemptId, expectedStatus: "running" });
+    fixture.runtime.evaluations.evaluateAttempt({ projectId: fixture.project.projectId, attemptId: rootAttempt.attemptId, proposedVerdict: "succeeded", riskSummary: null });
+    expect(fixture.runtime.workflowPhases.evaluate({ projectId: fixture.project.projectId, treeId: fixture.root.treeId, workflowRevision: 7 }))
+      .toMatchObject({ status: "passed", nextStage: "final_report", workflow: { revision: 8 } });
     fixture.runtime.close();
 
     const reopened = openRuntime(fixture.environment);
     expect(reopened.skeletonGates.list(fixture.project.projectId, { treeId: fixture.root.treeId }))
       .toEqual([expect.objectContaining({ resultId: passed.resultId, status: "passed" }), expect.objectContaining({ resultId: first.resultId, status: "failed" })]);
+    expect(reopened.workflowPhases.list(fixture.project.projectId, { treeId: fixture.root.treeId }))
+      .toHaveLength(4);
     reopened.close();
   });
 

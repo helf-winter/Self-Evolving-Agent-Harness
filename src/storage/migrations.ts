@@ -1095,4 +1095,49 @@ export const migrations: Migration[] = [{
       BEFORE DELETE ON skeleton_gate_results
       BEGIN SELECT RAISE(ABORT, 'skeleton gate results are immutable'); END;
   `,
+}, {
+  version: 17,
+  sql: `
+    ALTER TABLE workflow_states ADD COLUMN active_branch_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL;
+
+    CREATE TABLE workflow_branch_states (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE CASCADE,
+      branch_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      branch_order INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'active', 'implemented', 'verified')),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(tree_revision_id, branch_node_id),
+      UNIQUE(tree_revision_id, branch_order)
+    );
+    CREATE INDEX workflow_branch_state_scope_idx
+      ON workflow_branch_states(project_id, tree_id, tree_revision_id, status, branch_order);
+
+    CREATE TABLE workflow_phase_gate_results (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      workflow_revision INTEGER NOT NULL,
+      stage TEXT NOT NULL CHECK(stage IN ('branch_implementation', 'branch_verification', 'root_verification')),
+      branch_node_id TEXT REFERENCES task_nodes(id) ON DELETE SET NULL,
+      status TEXT NOT NULL CHECK(status IN ('passed', 'failed', 'uncertain')),
+      required_node_ids_json TEXT NOT NULL,
+      incomplete_node_ids_json TEXT NOT NULL,
+      blocking_drift_ids_json TEXT NOT NULL,
+      blocker_codes_json TEXT NOT NULL,
+      next_stage TEXT NOT NULL,
+      next_branch_node_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX workflow_phase_gate_history_idx
+      ON workflow_phase_gate_results(project_id, tree_id, created_at DESC, id DESC);
+    CREATE TRIGGER workflow_phase_gate_results_no_update
+      BEFORE UPDATE ON workflow_phase_gate_results
+      BEGIN SELECT RAISE(ABORT, 'workflow phase gate results are immutable'); END;
+    CREATE TRIGGER workflow_phase_gate_results_no_delete
+      BEFORE DELETE ON workflow_phase_gate_results
+      BEGIN SELECT RAISE(ABORT, 'workflow phase gate results are immutable'); END;
+  `,
 }];
