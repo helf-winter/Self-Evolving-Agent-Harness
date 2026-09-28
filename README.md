@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication、Tree-centered Runtime View，以及 Task Affiliation Confirmation 十六个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication、Tree-centered Runtime View、Task Affiliation Confirmation，以及 Jev Evidence Semantic Evaluation 十七个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -21,6 +21,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Snapshot、Task Tree、Artifact Graph、Artifact Detail、Plan Drift 与分页 Trace 查询，Trace 可按 `runId` 筛选并返回事件级 Execution Context，全部严格按 Project 隔离；
 - 基于当前节点修订的 Execution Attempt、Trace 证据关联、不可变 Evaluation 与确定性生命周期策略；
 - 未解决的阻断 Drift 会把成功提议记录为 `uncertain`，Evaluation 不能绕过确认门禁；
+- 可选的 TypeSafe Jev Provider 以固定模型对脱敏 Evidence Snapshot 做语义判断；低置信度、旧快照或 Provider 失败只能让成功提议降级为 `uncertain`；
 - Runtime Action 将自然语言意图转换为可校验的结构化状态变更；阻断 Drift Resolution 和 Scope Change 必须绑定明确的确认提示与用户回答 Trace；
 - User Change Request 区分 `minor_change`、`priority_change` 和 `scope_change`，保留来源、影响、状态及关联动作；
 - Scope Change 确认后产生新的 Task Tree 草稿修订并回到精炼阶段，不会直接授权代码执行；
@@ -39,7 +40,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - 父节点按当前 Task Tree revision 获得一跳 Child Task Reports；报告派生自 Attempt、Evaluation、Evidence、Artifact、Trace 与 Drift 事实，不维护第二份可漂移状态；
 - 可执行的非叶子 verification 节点只有在当前直接子节点全部成功后才能创建 Attempt，且父节点仍必须完成自己的独立 Evaluation；
 - Tree-centered View 以当前 Task Tree 为骨架提供 Snapshot、Summary、Detail 三档查询；默认只突出需关注关系，只有显式请求才返回可过滤的全局 Relation Overlay；
-- Bash CLI、Claude 插件 Skills 和 67 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 69 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -268,9 +269,9 @@ Agent 通过 Runtime Tools 执行下列链路：
 
 Readiness 结果和确认提示都绑定创建时的 Task Tree revision。树结构发生变化后，旧提示会返回 `revision_conflict`，不会被套用到新版本。部分分支确认不会自动确认兄弟分支，也不会让未确认节点进入执行阶段。
 
-## Jev 语义评估（可行性已验证，尚未接入）
+## Jev Evidence 语义评估
 
-项目计划将 [TypeSafe Jev](https://docs.typesafe.ai/introduction) 作为可选的语义评估 Provider，用于补足确定性规则无法回答的问题，例如：一条 Trace Evidence 的内容是否真正支持对应的 Acceptance Criterion、是否存在遗漏风险，以及是否需要人工复核。
+项目已将 [TypeSafe Jev](https://docs.typesafe.ai/introduction) 接为可选的 Evidence 语义评估 Provider，用于补足确定性规则无法回答的问题：一条 Trace Evidence 的有限事实是否真正支持对应的 Required Evidence 与 Acceptance Criteria。
 
 Jev 不替代测试、构建、Trace、Evaluation 或 Lifecycle Transition Policy，也不能直接把 Task Node 标记为 `succeeded`。预期链路为：
 
@@ -281,8 +282,7 @@ Trace + Artifact + Execution Attempt
                  ↓
       Jev Evaluation Provider
       ├─ Evidence 语义匹配度
-      ├─ 风险与遗漏判断
-      ├─ 人工复核建议
+      ├─ supported / unsupported / insufficient_context
       └─ 概率与置信度
                  ↓
  Deterministic Lifecycle Policy
@@ -292,15 +292,23 @@ Trace + Artifact + Execution Attempt
 
 2026-09-19 的内部可行性试验使用 6 条英文和 6 条中文合成任务记录：12/12 直接 verdict 符合预期，48/48 原子判断方向符合预期；两次批量请求共使用 8,070 个输入 token，成本约 `$0.00034`。该结果仅证明值得继续集成，不代表真实工程数据上的准确率或公开 benchmark。
 
-正式接入时必须满足以下边界：
+当前接入边界：
 
-- 默认可关闭，并固定经过验证的模型版本；
+- 默认关闭；只有 `HARNESS_JEV_ENABLED=true` 才发起外部请求，模型固定为 `jev-1.13.0`；
 - 仅发送脱敏、最小化的 Evaluation Snapshot，不发送源码、密钥或完整命令输出；
 - Provider 超时、失败或低置信度时降级为 `uncertain`，不得猜测成功；
-- 保存模型版本、概率、置信度、token 用量和耗时，作为可追溯 Evaluation Evidence；
+- `harness_evaluate_attempt_semantics` 将每条 Required Evidence 作为独立 Choice 问题，并保存模型版本、概率、置信度、token 用量、耗时和 snapshot hash；
+- `harness_get_semantic_evaluations` 可恢复不可变历史；证据变化后旧结果自动失效；
 - `TYPESAFE_API_KEY` 只从运行环境读取，不进入仓库、Runtime Database 或 Trace。
 
-第一阶段计划只实现 `JevEvaluationProvider` 的 Evidence 语义验证，不让 Jev 参与 Task Tree 规划、代码生成或确定性状态迁移。
+在 Bash / WSL 中启用：
+
+```bash
+export TYPESAFE_API_KEY='你的密钥'
+export HARNESS_JEV_ENABLED=true
+```
+
+可选阈值为 `HARNESS_JEV_MIN_PROBABILITY`（默认 `0.7`）、`HARNESS_JEV_MIN_CONFIDENCE`（默认 `0.5`）和 `HARNESS_JEV_TIMEOUT_MS`（默认 `10000`）。API Key 本身不会自动启用外部调用。Jev 不参与 Task Tree 规划、代码生成或状态迁移；最终状态仍由确定性 Lifecycle Transition Policy 决定。
 
 ## 在 Claude Code 中加载
 

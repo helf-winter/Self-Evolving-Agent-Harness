@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.30 |
+| 文档版本 | v0.31 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -47,6 +47,7 @@
 | v0.28 | 2026-09-18 | 明确 Evaluation 与 Task Node 状态之间的确定性转换策略，并建立 AI 测试案例质量契约、Baseline 与独立 Holdout 验证流程 | Codex |
 | v0.29 | 2026-09-18 | 明确 Failure Case L0-L4 成熟度、Task Tree 中心渐进视图、Artifact 自适应粒度与 Relation Edge 的 Artifact 绑定矩阵 | Codex |
 | v0.30 | 2026-09-28 | 明确 Task Tree 归属确认必须持久化候选快照、Runtime Action、用户回答 Trace 与最终新建/归并结果 | Codex |
+| v0.31 | 2026-09-28 | 增加可选 Jev Evidence 语义评估、脱敏快照、失败关闭策略和确定性生命周期边界 | Codex |
 
 ## 2. 项目概述
 
@@ -2408,7 +2409,27 @@ Artifact Contract 不是新的独立 Shared Contract 系统。它是 Artifact Gr
 | required_evidence_coverage | required evidence 覆盖情况 |
 | missing_evidence | uncertain 或不能成功转换时缺失的证据 |
 | risk_summary | 风险说明 |
+| semantic_evaluation_result_id | 当前 Evidence Snapshot 对应的语义评估结果，可为空 |
 | created_at | 创建时间 |
+
+#### Semantic Evaluation Result
+
+| 字段 | 描述 |
+| --- | --- |
+| semantic_evaluation_result_id | 不可变语义评估结果标识 |
+| project_id / task_tree_id / task_node_id | 严格限定的任务归属 |
+| task_node_revision_id / execution_attempt_id | 被评估的精确执行版本 |
+| provider | 首版为 typesafe_jev |
+| status | passed、review、unavailable |
+| model_requested / model_resolved | 固定请求模型与 Provider 返回的实际版本 |
+| snapshot_hash | 脱敏 Evidence Snapshot 的规范哈希；证据变化后旧结果失效 |
+| question_results | 每条 Required Evidence 的 choice、supported probability、confidence 与阈值结论 |
+| thresholds | 本次使用的 probability / confidence 阈值 |
+| token_usage / latency_ms | Provider 使用量与耗时 |
+| error_code | 认证、超时、限流、过载、网络或响应格式等脱敏错误码，可为空 |
+| created_at | 创建时间 |
+
+Semantic Evaluation Result 是 Evaluation Evidence，不是 Task Node 状态。只允许发送任务验收文本与有界工具结果元数据，不得发送源码、完整命令输出、transcript、任意环境变量或 API Key。Provider 失败、结果低于阈值、结果为 review，或 snapshot hash 过期时，成功提议必须降级为 `uncertain`；它不得升级失败结果或绕过 revision、evidence、dependency、children 与 drift 硬门禁。
 
 #### Lifecycle Transition Policy
 
@@ -2923,6 +2944,8 @@ Artifact 查询必须支持按 `granularity`、`artifact_type`、`artifact_statu
 系统需要支持对指定 Task Node Revision 与 Execution Attempt 发起评估，并返回不可变 Evaluation Result、required evidence coverage、missing evidence、风险和证据引用。
 
 Evaluation 接口不得直接写入 Task Node Status。状态变化必须提交给 Lifecycle Transition Policy；接口需要返回转换是否适用、目标状态或拒绝原因。旧 revision 的 Evaluation 必须返回 `stale_evaluation`，不得推进当前节点。
+
+系统可以启用 Jev Evidence Semantic Evaluation。启用必须是显式配置，模型版本必须固定；API Key 只能从运行环境读取。接口应把每条 Required Evidence 拆为独立的结构化 Choice 判断，持久化概率、confidence、token、耗时和 snapshot hash。Provider 缺失、超时、错误、低置信度、人工复核或证据快照变化时，成功 Evaluation 必须 fail closed 为 `uncertain`。禁用时现有确定性 Evaluation 行为保持不变。
 
 ### 8.12 Evolution 接口
 

@@ -7,6 +7,8 @@ description: Use when a Task Tree branch or root is approaching completion and n
 
 Verify from leaves toward the root. For each completed node, run its declared acceptance criteria and collect actual command or Artifact evidence. Query `harness_get_task_node_detail` for existing evidence and `harness_get_trace_events` only when more history is required.
 
+Before proposing a successful node Evaluation, inspect `semanticEvaluation` in `harness_get_runtime_snapshot`. When it is enabled, call `harness_evaluate_attempt_semantics` after all required evidence is attached and before `harness_evaluate_node_attempt`. Only a current `passed` result can support success. Treat `review` or `unavailable` as `uncertain`; do not retry blindly, expose secrets, or bypass the deterministic lifecycle policy. Use `harness_get_semantic_evaluations` to recover the persisted result after restart.
+
 Report separately:
 
 - which acceptance criteria passed and their evidence;

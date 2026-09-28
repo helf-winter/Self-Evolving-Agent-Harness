@@ -290,14 +290,32 @@ npm test -- --run tests/unit/task-tree.test.ts tests/integration/runtime-query.t
 npm test -- --run tests/integration/task-affiliation-service.test.ts tests/integration/hook-ingestion.test.ts tests/e2e/task-affiliation-confirmation.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 17. 安全检查
+## 17. Jev Evidence Semantic Evaluation
+
+使用注入的 fake Provider 创建一个带 Required Evidence 的 verifying Attempt：
+
+1. 默认环境调用语义评估；必须返回 `enabled: false`，不得访问网络，也不得改变既有确定性 Evaluation 行为。
+2. 设置 `HARNESS_JEV_ENABLED=true` 但不提供 `TYPESAFE_API_KEY`；Runtime Snapshot 必须显示 `misconfigured`，成功提议必须保持 `uncertain`。
+3. 启用并返回高于阈值的 supported Choice；确认外发 snapshot 只包含任务/验收文本、事件类型、工具类型、Artifact 引用、ok / exitCode / 安全 status，不包含源码、完整命令、stdout、transcript、任意环境变量或 API Key。
+4. 确认不可变结果保存 requested/resolved model、每题 choice/probability/confidence、thresholds、token、latency 与 snapshot hash；成功 Evaluation 引用该结果后仍由确定性 Lifecycle Transition Policy 决定状态。
+5. 在语义评估后追加或替换 Attempt Evidence；旧 snapshot hash 不得支持成功，必须降级为 `uncertain`。
+6. 分别模拟 401、429、529、timeout、network failure 和 malformed response；只能保存脱敏 error code，成功提议必须降级为 `uncertain`，不得泄漏响应正文或崩溃 Runtime。
+7. 重启 Runtime 后调用 `harness_get_semantic_evaluations`；结果应稳定恢复。使用另一个 Project 查询必须返回空或 `not_found`，不得跨项目泄漏。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/unit/semantic-evaluation.test.ts tests/unit/jev-evaluation-provider.test.ts tests/integration/semantic-evaluation-service.test.ts tests/integration/evaluation-service.test.ts tests/plugin/mcp.test.ts
+```
+
+## 18. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 18. 当前不作为验收失败的范围
+## 19. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
