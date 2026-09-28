@@ -1033,4 +1033,39 @@ export const migrations: Migration[] = [{
     CREATE INDEX task_affiliation_history_idx
       ON task_affiliation_decisions(project_id, created_at DESC, id DESC);
   `,
+}, {
+  version: 15,
+  sql: `
+    CREATE TABLE semantic_evaluation_results (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      task_node_id TEXT NOT NULL REFERENCES task_nodes(id) ON DELETE CASCADE,
+      task_node_revision_id TEXT NOT NULL REFERENCES task_node_revisions(id) ON DELETE CASCADE,
+      execution_attempt_id TEXT NOT NULL REFERENCES execution_attempts(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('passed', 'review', 'unavailable')),
+      model_requested TEXT NOT NULL,
+      model_resolved TEXT,
+      snapshot_hash TEXT NOT NULL,
+      question_results_json TEXT NOT NULL,
+      thresholds_json TEXT NOT NULL,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      latency_ms INTEGER NOT NULL,
+      error_code TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX semantic_evaluation_attempt_history_idx
+      ON semantic_evaluation_results(project_id, execution_attempt_id, created_at DESC, id DESC);
+    ALTER TABLE evaluations ADD COLUMN semantic_evaluation_result_id TEXT
+      REFERENCES semantic_evaluation_results(id) ON DELETE SET NULL;
+
+    CREATE TRIGGER semantic_evaluation_results_no_update
+      BEFORE UPDATE ON semantic_evaluation_results
+      BEGIN SELECT RAISE(ABORT, 'semantic evaluation results are immutable'); END;
+    CREATE TRIGGER semantic_evaluation_results_no_delete
+      BEFORE DELETE ON semantic_evaluation_results
+      BEGIN SELECT RAISE(ABORT, 'semantic evaluation results are immutable'); END;
+  `,
 }];

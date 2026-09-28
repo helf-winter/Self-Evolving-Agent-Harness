@@ -93,7 +93,10 @@ function encodeCursor(offset: number): string {
 }
 
 export class RuntimeQueryService {
-  constructor(private readonly database: RuntimeDatabase) {}
+  constructor(
+    private readonly database: RuntimeDatabase,
+    private readonly runtimeOptions: { semanticEvaluation?: Record<string, unknown> } = {},
+  ) {}
 
   getRuntimeSnapshot(projectId: string) {
     this.requireProject(projectId);
@@ -135,6 +138,7 @@ export class RuntimeQueryService {
       activeAttemptCount,
       confirmationCounts,
       driftCounts,
+      semanticEvaluation: this.runtimeOptions.semanticEvaluation ?? { enabled: false, readiness: "disabled" },
       availableActions: this.availableActions(workflow?.stage, pendingAffiliationCount > 0),
     };
   }

@@ -12,6 +12,7 @@ import { canonicalJson } from "../domain/trace.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 import { FailureCaseService } from "./failure-case-service.js";
 import { EvolutionService } from "./evolution-service.js";
+import { loadSemanticEvidenceSnapshot } from "./semantic-evaluation-service.js";
 
 interface EvaluationAttemptRow {
   id: string;
@@ -38,6 +39,7 @@ export interface EvaluationResultView {
   coveredRequiredEvidence: string[];
   missingRequiredEvidence: string[];
   riskSummary: string | null;
+  semanticEvaluationResultId: string | null;
   createdAt: string;
 }
 
@@ -50,7 +52,12 @@ export class EvaluationService {
   private readonly failures: FailureCaseService;
   private readonly evolution: EvolutionService;
 
-  constructor(private readonly database: RuntimeDatabase, failures?: FailureCaseService, evolution?: EvolutionService) {
+  constructor(
+    private readonly database: RuntimeDatabase,
+    failures?: FailureCaseService,
+    evolution?: EvolutionService,
+    private readonly options: { semanticEvaluationRequired?: boolean } = {},
+  ) {
     this.failures = failures ?? new FailureCaseService(database);
     this.evolution = evolution ?? new EvolutionService(database);
   }
@@ -79,7 +86,19 @@ export class EvaluationService {
     const dependenciesSucceeded = this.dependenciesSucceeded(attempt.tree_id, body.dependencies ?? []);
     const childrenSucceeded = this.childrenSucceeded(attempt.tree_id, attempt.task_node_id);
     const successConditionsMet = missing.length === 0 && dependenciesSucceeded && childrenSucceeded;
-    const verdict: EvaluationVerdict = input.proposedVerdict === "succeeded" && (!successConditionsMet || blockingDrift)
+    let semanticEvaluationResultId: string | null = null;
+    let semanticEvidencePassed = true;
+    if (input.proposedVerdict === "succeeded" && this.options.semanticEvaluationRequired) {
+      const { snapshotHash } = loadSemanticEvidenceSnapshot(this.database, input.projectId, input.attemptId);
+      const semantic = this.database.get<{ id: string; status: string }>(`
+        SELECT id, status FROM semantic_evaluation_results
+        WHERE project_id = ? AND execution_attempt_id = ? AND snapshot_hash = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1
+      `, input.projectId, input.attemptId, snapshotHash);
+      semanticEvaluationResultId = semantic?.id ?? null;
+      semanticEvidencePassed = semantic?.status === "passed";
+    }
+    const verdict: EvaluationVerdict = input.proposedVerdict === "succeeded" && (!successConditionsMet || blockingDrift || !semanticEvidencePassed)
       ? "uncertain"
       : input.proposedVerdict;
     const currentRevision = attempt.revision_tree_id === attempt.current_revision_id;
@@ -103,12 +122,12 @@ export class EvaluationService {
           id, project_id, tree_id, task_node_id, task_node_revision_id,
           execution_attempt_id, verdict, evidence_refs_json,
           covered_required_evidence_json, missing_required_evidence_json,
-          risk_summary, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          risk_summary, semantic_evaluation_result_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       evaluationId, attempt.project_id, attempt.tree_id, attempt.task_node_id, attempt.task_node_revision_id,
       attempt.id, verdict, canonicalJson(evidenceRefs), canonicalJson(covered), canonicalJson(missing),
-      input.riskSummary ?? "", createdAt);
+      input.riskSummary ?? "", semanticEvaluationResultId, createdAt);
       this.database.run(`
         INSERT INTO lifecycle_transition_records (
           id, evaluation_id, task_node_id, policy_version, from_status,
@@ -146,6 +165,7 @@ export class EvaluationService {
         coveredRequiredEvidence: covered,
         missingRequiredEvidence: missing,
         riskSummary: input.riskSummary,
+        semanticEvaluationResultId,
         createdAt,
       },
       transition: { evaluationId, fromStatus: attempt.node_status, ...decision },

@@ -786,6 +786,22 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     projectId: (await existingProject(cwd)).projectId, attemptId, proposedVerdict, riskSummary: riskSummary ?? null,
   })));
 
+  server.registerTool("harness_evaluate_attempt_semantics", {
+    description: "Optionally ask pinned TypeSafe Jev whether bounded Attempt evidence supports its required evidence; never changes Task state directly.",
+    inputSchema: { cwd: cwdSchema, attemptId: z.string().min(1) },
+  }, ({ cwd, attemptId }) => guarded(async () => runtime.semanticEvaluations.evaluateAttempt(
+    (await existingProject(cwd)).projectId,
+    attemptId,
+  )));
+
+  server.registerTool("harness_get_semantic_evaluations", {
+    description: "List persisted semantic evidence evaluations in the current Project, optionally for one Attempt.",
+    inputSchema: { cwd: cwdSchema, attemptId: z.string().min(1).optional() },
+  }, ({ cwd, attemptId }) => guarded(async () => runtime.semanticEvaluations.list(
+    (await existingProject(cwd)).projectId,
+    attemptId,
+  )));
+
   return { server, close: async () => { await server.close(); runtime.close(); } };
 }
 

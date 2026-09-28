@@ -29,6 +29,7 @@ describe("Harness MCP binding", () => {
       "harness_select_task_tree", "harness_archive_task_tree", "harness_restore_task_tree",
       "harness_save_draft_revision", "harness_scan_plan_readiness", "harness_start_node_attempt",
       "harness_begin_node_verification", "harness_attach_attempt_evidence", "harness_evaluate_node_attempt",
+      "harness_evaluate_attempt_semantics", "harness_get_semantic_evaluations",
       "harness_get_artifact_graph", "harness_get_artifact_detail", "harness_get_plan_drift_summary",
       "harness_record_plan_drift",
       "harness_get_waiting_items", "harness_get_user_change_requests", "harness_get_runtime_action_detail",
@@ -62,6 +63,9 @@ describe("Harness MCP binding", () => {
     expect(tools.find((tool) => tool.name === "harness_resolve_task_affiliation")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["decisionId", "choice", "answerTraceEventId"]),
       properties: { choice: { enum: ["new_tree", "merge", "pause"] }, chosenTreeId: { type: "string" } },
+    });
+    expect(tools.find((tool) => tool.name === "harness_evaluate_attempt_semantics")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["attemptId"]), properties: { attemptId: { type: "string" } },
     });
     expect(tools.find((tool) => tool.name === "harness_apply_draft_change_set")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["sourceUserMessageTraceEventId", "decision"]),
@@ -159,6 +163,13 @@ describe("Harness MCP binding", () => {
     expect((await client.callTool({ name: "harness_get_user_change_requests", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_failure_cases", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_skill_evolution_candidates", arguments: { cwd: project } })).isError).not.toBe(true);
+    const semanticDisabled = await client.callTool({
+      name: "harness_evaluate_attempt_semantics", arguments: { cwd: project, attemptId: "not-used-while-disabled" },
+    });
+    const semanticDisabledContent = (semanticDisabled as { content: Array<{ type: string; text?: string }> }).content;
+    expect(JSON.parse(semanticDisabledContent[0]?.type === "text" ? semanticDisabledContent[0].text ?? "null" : "null"))
+      .toMatchObject({ enabled: false, configuration: { readiness: "disabled", model: "jev-1.13.0" } });
+    expect((await client.callTool({ name: "harness_get_semantic_evaluations", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_task_node_effects", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_task_node_replacements", arguments: { cwd: project } })).isError).not.toBe(true);
     expect((await client.callTool({ name: "harness_get_project_identity", arguments: { cwd: project } })).isError).not.toBe(true);

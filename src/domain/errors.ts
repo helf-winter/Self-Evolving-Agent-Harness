@@ -28,6 +28,17 @@ export type HarnessErrorCode =
   | "replacement_invalid"
   | "project_clone_invalid"
   | "plugin_composition_invalid"
+  | "invalid_configuration"
+  | "provider_disabled"
+  | "provider_misconfigured"
+  | "provider_authentication_failed"
+  | "provider_rate_limited"
+  | "provider_overloaded"
+  | "provider_request_invalid"
+  | "provider_connection_failed"
+  | "provider_timeout"
+  | "provider_response_invalid"
+  | "provider_http_error"
   | "database_busy"
   | "storage_failure";
 
