@@ -2,7 +2,7 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle，以及 Parent–Child Task Communication 十四个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication，以及 Tree-centered Runtime View 十五个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
@@ -37,7 +37,8 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - Skeleton Gate 只接受真实成功的 Skeleton Attempt，不接受模型自行声明“完成”；
 - 父节点按当前 Task Tree revision 获得一跳 Child Task Reports；报告派生自 Attempt、Evaluation、Evidence、Artifact、Trace 与 Drift 事实，不维护第二份可漂移状态；
 - 可执行的非叶子 verification 节点只有在当前直接子节点全部成功后才能创建 Attempt，且父节点仍必须完成自己的独立 Evaluation；
-- Bash CLI、Claude 插件 Skills 和 63 个 MCP Runtime Tools。
+- Tree-centered View 以当前 Task Tree 为骨架提供 Snapshot、Summary、Detail 三档查询；默认只突出需关注关系，只有显式请求才返回可过滤的全局 Relation Overlay；
+- Bash CLI、Claude 插件 Skills 和 64 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -120,6 +121,18 @@ Task Tree 中的父子通信不是额外维护一份可变汇报，而是 Runtim
 - skeleton 阶段仍可先搭建上层框架；进入非叶子 verification 节点执行时，Runtime 会在创建 Attempt 前确定性校验所有当前直接子节点；
 - 子节点成功只满足父节点的前置条件，不会自动把父节点标记成功。父节点必须产生自己的 Attempt、证据和 Evaluation；
 - 所有查询和门禁都由当前 Project 解析 tree/node，不会通过 ID 读取其他项目的数据。
+
+### Tree-centered Runtime View
+
+`harness_get_tree_view` 让 Agent、CLI 和未来图形界面共享同一套渐进式查询语义：
+
+- `snapshot` 返回当前 revision 的整棵树节点摘要，但关系只返回 cycle、缺失 Artifact、未确认依赖或未完成依赖等需关注项；
+- `summary` 返回树摘要和选中节点的一跳入边、出边，以及 Artifact、Trace、Failure Case 和关系计数引用；
+- `detail` 默认仍保持一跳范围；只有 `includeRelationOverlay: true` 才返回全局 Relation Overlay；
+- Overlay 可按 relation kind、方向、分支、关系状态、风险、节点状态和 Artifact 过滤；
+- 节点状态、execution phase、确认状态、Drift、Artifact 数量、最新适用 Evaluation 和 Evidence coverage 均从当前 revision 的事实派生，不维护重复视图状态；
+- Relation ID、Task Node ID、Artifact ID、Attempt ID、Evaluation ID 和 Failure Case ID 保持稳定，可继续进入现有 Detail 查询；
+- 历史 `data_exchange` 与 `shares_contract` 输入仍可读取；新 revision 统一保存为 `exchanges_data_with` 与 `shares_artifact_with`。
 
 ### Project Identity 与 Clone
 

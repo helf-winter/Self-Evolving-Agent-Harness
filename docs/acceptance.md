@@ -254,14 +254,32 @@ npm test -- --run tests/integration/task-tree-service.test.ts tests/integration/
 npm test -- --run tests/integration/runtime-query.test.ts tests/integration/node-execution.test.ts tests/e2e/parent-child-task-communication.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 15. 安全检查
+## 15. Tree-centered Runtime View
+
+在同一棵 Task Tree 中创建多个分支、计划态 Artifact，以及 `depends_on`、`calls`、`exchanges_data_with`、`shares_artifact_with`、`coordinates_with` 关系：
+
+1. 调用 `harness_get_tree_view` 的 `snapshot`；确认返回所有当前节点的最小摘要，但关系只包含 cycle、缺失 Artifact、未确认依赖和未完成依赖等需关注项。
+2. 节点摘要必须包含 status、execution phase、confirmation state、warning / blocking Drift 数量、Artifact planned / actual 数量、最新当前-revision Evaluation 和 Evidence coverage。
+3. 使用 `summary` 并指定节点；确认只返回该节点一跳关系，以及 Artifact、Trace、Failure Case 和关系数量引用。
+4. 使用 `detail` 但不设置 `includeRelationOverlay`；确认仍不会返回全局关系图。显式设置为 `true` 后才返回全树范围。
+5. 分别按 relation kind、incoming / outgoing、branch、relation status、risk、node status 和 Artifact 过滤；结果必须同时满足所有已提供条件。
+6. 重启 Runtime 后重复查询；确认 relation ID 与节点事实保持稳定，历史 alias 能读取，新 revision 使用规范关系名。
+7. 使用另一 Project 的 tree/node ID；必须返回 `not_found`，不得泄漏节点、关系或 Artifact 引用。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/unit/task-tree.test.ts tests/integration/runtime-query.test.ts tests/e2e/tree-centered-runtime-view.test.ts tests/plugin/mcp.test.ts
+```
+
+## 16. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 16. 当前不作为验收失败的范围
+## 17. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
