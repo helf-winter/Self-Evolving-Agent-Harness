@@ -2,12 +2,13 @@
 
 Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约束任务规划和执行方式，Hooks 记录生命周期事实，MCP 工具提供可验证的 Task Tree 与 Runtime State 操作。它不是独立管理 Claude 的后台系统。
 
-当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication，以及 Tree-centered Runtime View 十五个纵向切片：
+当前版本实现 Runtime Foundation、Branch Confirmation、Node Execution & Evaluation、Artifact Graph & Plan Drift、Runtime Action & User Change、Failure Case Maturity、Experience & Skill Evolution、Task Node Replacement & Effect Disposal、Project Identity & Clone、Plugin Composition Contract、Task Tree Refinement Loop、Trace Execution Context、Task Tree Collection Lifecycle、Parent–Child Task Communication、Tree-centered Runtime View，以及 Task Affiliation Confirmation 十六个纵向切片：
 
 - 全局 SQLite Runtime Database（Node 内置 `node:sqlite`，无原生数据库依赖）；
 - token 校验的 `.agent-harness-project.json` 最小身份 marker、路径别名、移动/重命名识别和可追溯 Project Clone；
 - Task Tree 根任务、不可变修订、Leaf Task Contract、关系与 Artifact 校验；
 - 一个 Project 可维护多棵 Task Tree；创建或选择时仅激活一套 Workflow，归档可恢复且不删除 revision、Trace 或 Artifact 证据；
+- 普通 coding 请求先持久化确定性候选快照、Agent 建议和确认提示；只有绑定后续用户回答 Trace 后才会新建或选择 Task Tree；
 - 允许保存不完整但结构合法的规划草案；按 tree/branch 范围执行确定性 Plan Readiness、问题优先级和语义警告；
 - 局部 refinement 可直接应用，跨分支 refinement 必须先持久化影响预览；成功应用原子绑定用户消息 Trace、Draft Change Set、Decision Record、planning Trace、新 revision 与 Skeleton 投影；
 - 规划、版本绑定的分支确认、Skeleton、实现和验证工作流状态；
@@ -38,7 +39,7 @@ Agent Harness 是 Claude Code 内部的一层长期工程运行时：Skills 约�
 - 父节点按当前 Task Tree revision 获得一跳 Child Task Reports；报告派生自 Attempt、Evaluation、Evidence、Artifact、Trace 与 Drift 事实，不维护第二份可漂移状态；
 - 可执行的非叶子 verification 节点只有在当前直接子节点全部成功后才能创建 Attempt，且父节点仍必须完成自己的独立 Evaluation；
 - Tree-centered View 以当前 Task Tree 为骨架提供 Snapshot、Summary、Detail 三档查询；默认只突出需关注关系，只有显式请求才返回可过滤的全局 Relation Overlay；
-- Bash CLI、Claude 插件 Skills 和 64 个 MCP Runtime Tools。
+- Bash CLI、Claude 插件 Skills 和 67 个 MCP Runtime Tools。
 
 ## 环境要求
 
@@ -110,6 +111,19 @@ Task Tree 属于 Project，而不是聊天 Session。一个 Project 可以保留
 - 恢复会回到归档前状态，但不会自动选择、执行或重新激活 Workflow；
 - 当前树存在 `running` 或 `verifying` Attempt 时，切换、新建或归档会被拒绝，必须先完成或中止该 Attempt；
 - CLI 的 `tree select/archive/restore` 与 MCP 的 `harness_select_task_tree`、`harness_archive_task_tree`、`harness_restore_task_tree` 使用同一事务化服务逻辑，并始终按当前目录绑定的 Project 隔离。
+
+### Task Affiliation Confirmation
+
+普通 coding 请求不能由 Agent 静默新建或归并 Task Tree。`task-tree-planning` Skill 使用一条可恢复的确认链路：
+
+1. `harness_propose_task_affiliation` 在当前 Project 内执行确定性候选检索，保存候选快照、Agent 的 `new_tree` / `merge` 建议、Runtime Action 和确认提示，但不创建或选择树；
+2. Agent 向用户展示候选、匹配依据与建议，用户选择 `new_tree`、`merge` 或 `pause`；
+3. 等待确认期间，即使尚无 active Workflow，Hook 仍会把回答记录为 `UserPromptSubmit` Trace；普通解释性聊天仍不会创建 Project 或 Runtime 状态；
+4. `harness_resolve_task_affiliation` 只接受同一 Project 中、提示之后的回答 Trace；`merge` 还会重新校验目标树未归档且属于当前 Project；
+5. `new_tree` 在确认后才创建并选择根任务，`merge` 只选择现有树，`pause` 不改变树；同一决定重复提交相同选择保持幂等；
+6. `harness_get_task_affiliations` 和 Runtime Snapshot 可在重启后恢复待确认或已解决结果。每个 Project 同时最多一个待确认归属。
+
+显式 `/taskroot [任务名称]` 是用户直接要求新建根任务的命令，不经过普通 coding 请求的归属选择。
 
 ### Parent–Child Task Communication
 

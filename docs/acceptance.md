@@ -272,14 +272,32 @@ npm test -- --run tests/integration/runtime-query.test.ts tests/integration/node
 npm test -- --run tests/unit/task-tree.test.ts tests/integration/runtime-query.test.ts tests/e2e/tree-centered-runtime-view.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 16. 安全检查
+## 16. Task Affiliation Confirmation
+
+在一个尚无 Task Tree 的 Project 发起普通 coding 请求归属提议：
+
+1. 调用 `harness_propose_task_affiliation`；确认结果包含确定性候选快照、Agent 建议、Runtime Action 和待确认提示，数据库中仍不存在新 Task Tree。
+2. 在同一 Project 再次提议；必须返回 `confirmation_required`，不得创建第二个待确认归属。
+3. 在没有 active Workflow 的情况下提交用户回答；Hook 必须记录 `UserPromptSubmit` Trace。对一个全新目录进行普通解释性对话时仍必须返回 `inactive`，且不得创建 Project marker。
+4. 使用提示之前、其他 Project 或非 `UserPromptSubmit` Trace 解决决定；必须拒绝且不改变 Task Tree。使用有效回答选择 `new_tree` 后才创建并选择根任务。
+5. 为已有 Task Tree 提议 `merge`；候选快照必须包含目标树。确认时重新校验目标属于当前 Project 且未归档，然后只选择该树，不创建新树。
+6. 选择 `pause`；确认提示关闭，但不得创建、选择或修改 Task Tree。重复提交相同已解决选择应返回原结果，不产生第二棵树。
+7. 重启 Runtime 后查询 `harness_get_task_affiliations` 和 Runtime Snapshot；候选快照、回答 Trace、最终树、待确认计数和可用动作必须稳定恢复。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/task-affiliation-service.test.ts tests/integration/hook-ingestion.test.ts tests/e2e/task-affiliation-confirmation.test.ts tests/plugin/mcp.test.ts
+```
+
+## 17. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 17. 当前不作为验收失败的范围
+## 18. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

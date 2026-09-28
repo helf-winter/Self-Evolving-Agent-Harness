@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.29 |
+| 文档版本 | v0.30 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -46,6 +46,7 @@
 | v0.27 | 2026-09-18 | 明确自然语言状态提交边界、Trace 事实源与 Artifact 投影关系，并增加问题驱动的 Task Tree Refinement Loop | Codex |
 | v0.28 | 2026-09-18 | 明确 Evaluation 与 Task Node 状态之间的确定性转换策略，并建立 AI 测试案例质量契约、Baseline 与独立 Holdout 验证流程 | Codex |
 | v0.29 | 2026-09-18 | 明确 Failure Case L0-L4 成熟度、Task Tree 中心渐进视图、Artifact 自适应粒度与 Relation Edge 的 Artifact 绑定矩阵 | Codex |
+| v0.30 | 2026-09-28 | 明确 Task Tree 归属确认必须持久化候选快照、Runtime Action、用户回答 Trace 与最终新建/归并结果 | Codex |
 
 ## 2. 项目概述
 
@@ -2031,6 +2032,28 @@ Project Identity Marker 是项目目录中的最小身份文件，不是 Runtime
 | is_primary | 是否为当前主要展示路径 |
 | created_at | 创建时间 |
 
+#### Task Affiliation Decision
+
+| 字段 | 描述 |
+| --- | --- |
+| task_affiliation_decision_id | 任务归属决定唯一标识 |
+| project_id | 当前工作目录解析出的所属 Project |
+| request_trace_event_id | 归属提议 Trace；只保存请求摘要和结构化候选依据，不保存隐藏思维链 |
+| request_title | 用户可见的 coding 请求标题 |
+| candidate_query | 确定性候选检索使用的查询 |
+| candidate_snapshot | 提议时返回的有界 Task Tree 候选及 matched_by 依据快照 |
+| recommendation | Agent 提出的 new_tree 或 merge 建议 |
+| recommended_tree_id | 建议归并的候选树，可为空 |
+| confirmation_prompt_id | 明确要求用户选择 new_tree、merge 或 pause 的 Runtime Confirmation Prompt |
+| runtime_action_id | 对应的结构化 Task 归属 Runtime Action |
+| answer_trace_event_id | 提示之后、同一 Project 的 UserPromptSubmit Trace，可为空 |
+| status | pending、new_tree、merged、paused |
+| resolved_tree_id | 最终新建或选择的 Task Tree；paused 时为空 |
+| created_at | 提议时间 |
+| resolved_at | 解决时间，可为空 |
+
+每个 Project 同时最多存在一个 pending Task Affiliation Decision。提议阶段不得创建、选择或修改 Task Tree；只有有效回答 Trace 绑定决定后，Runtime 才能原子推进对应的新建或归并结果。显式 `/taskroot` 属于用户直接授权新建根任务，不创建普通归属决定。
+
 #### Task Tree
 
 | 字段 | 描述 |
@@ -2882,6 +2905,8 @@ Runtime Record 接口必须读写 Harness 公共数据库，并根据当前 Agen
 ### 8.9 任务查询接口
 
 系统需要支持按当前 Project、Task Tree、Task Node、Execution Context、Artifact 查询任务和执行记录。Task Tree 候选查询必须先按 canonical_path 隔离 Project，再按显式 Tree ID / 名称、Artifact 路径、模块 / 符号、关键词、状态和更新时间执行确定性排序，并返回匹配依据。
+
+普通 coding 请求的 Task Tree 归属必须通过 Task Affiliation 接口持久化：proposal 保存候选快照、Agent 建议、Runtime Action 和确认提示，但不改变 Task Tree；resolve 必须绑定提示之后、同一 Project 的 `UserPromptSubmit` Trace，并重新校验 merge 目标。接口需要支持 `new_tree`、`merge` 和 `pause`，对同一已解决选择保持幂等，并在 Runtime 重启后可查询恢复。
 
 Task Node 创建或更新接口应支持提交 Leaf Task Contract，并返回结构硬校验结果、错误字段和启发式警告。结构校验通过不代表语义判断通过；叶子边界仍需包含在用户确认的 Task Tree Revision 中。
 
