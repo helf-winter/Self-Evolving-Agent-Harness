@@ -126,6 +126,13 @@ export class RuntimeQueryService {
       "SELECT count(*) AS count FROM task_affiliation_decisions WHERE project_id = ? AND status = 'pending'",
       projectId,
     )?.count ?? 0;
+    const latestSkeletonGate = workflow
+      ? this.database.get<{ id: string; status: string; tree_revision_id: string; blockers_json: string; created_at: string }>(`
+          SELECT id, status, tree_revision_id, blockers_json, created_at
+          FROM skeleton_gate_results WHERE project_id = ? AND tree_id = ?
+          ORDER BY created_at DESC, id DESC LIMIT 1
+        `, projectId, workflow.tree_id)
+      : undefined;
     return {
       projectId,
       selectedTreeId: state?.selected_tree_id ?? null,
@@ -139,6 +146,12 @@ export class RuntimeQueryService {
       confirmationCounts,
       driftCounts,
       semanticEvaluation: this.runtimeOptions.semanticEvaluation ?? { enabled: false, readiness: "disabled" },
+      latestSkeletonGate: latestSkeletonGate ? {
+        resultId: latestSkeletonGate.id, status: latestSkeletonGate.status,
+        treeRevisionId: latestSkeletonGate.tree_revision_id,
+        blockerCount: (JSON.parse(latestSkeletonGate.blockers_json) as unknown[]).length,
+        createdAt: latestSkeletonGate.created_at,
+      } : null,
       availableActions: this.availableActions(workflow?.stage, pendingAffiliationCount > 0),
     };
   }
@@ -1618,7 +1631,7 @@ export class RuntimeQueryService {
         : stage === "branch_confirmation"
           ? ["confirm_scope", "refine_tree"]
           : stage === "skeleton_pass"
-            ? ["execute_skeleton", "inspect_detail"]
+            ? ["execute_skeleton", "evaluate_skeleton_gate", "inspect_detail"]
             : ["inspect_detail", "record_evidence"];
     return pendingAffiliation
       ? ["resolve_task_affiliation", "inspect_task_affiliations", ...stageActions]

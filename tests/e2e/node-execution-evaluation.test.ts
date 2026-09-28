@@ -49,8 +49,8 @@ describe("Node execution and evaluation vertical slice", () => {
     first.executions.attachEvidence({ projectId: project.projectId, attemptId: skeleton.attemptId, requiredEvidenceKey: "compile", traceEventId: compile.eventId });
     first.executions.beginVerification({ projectId: project.projectId, attemptId: skeleton.attemptId, expectedStatus: "running" });
     expect(first.evaluations.evaluateAttempt({ projectId: project.projectId, attemptId: skeleton.attemptId, proposedVerdict: "succeeded", riskSummary: null }).transition.applied).toBe(true);
-    first.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 4, to: "skeleton_gate" });
-    first.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 5, to: "branch_implementation", skeletonGateEvidenceId: skeleton.attemptId });
+    expect(first.skeletonGates.evaluate({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 4 }))
+      .toMatchObject({ status: "passed", workflow: { stage: "branch_implementation", revision: 5 } });
 
     for (const index of [1, 2]) {
       const attempt = first.executions.startAttempt({ projectId: project.projectId, nodeId: "implementation", expectedTreeRevisionId: revision.revisionId });

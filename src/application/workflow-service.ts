@@ -229,34 +229,14 @@ export class WorkflowService {
     skeletonGateEvidenceId?: string;
   }) {
     const workflow = this.requireWorkflow(input.projectId, input.treeId, input.workflowRevision);
+    if (input.to === "skeleton_gate" || workflow.stage === "skeleton_gate") {
+      throw new HarnessError("workflow_transition_rejected", "use the deterministic Skeleton Gate evaluation instead of manually changing the Gate stage");
+    }
     const evidence: { confirmationId?: string; skeletonGateEvidenceId?: string } = {};
     if (input.confirmationId) evidence.confirmationId = input.confirmationId;
     if (input.skeletonGateEvidenceId) evidence.skeletonGateEvidenceId = input.skeletonGateEvidenceId;
     const result = canTransitionWorkflow(workflow.stage, input.to, evidence);
     if (!result.ok) throw new HarnessError(result.code, result.reason);
-    if (workflow.stage === "skeleton_gate") {
-      const skeletonAttempt = this.database.get<{ body_json: string }>(`
-        SELECT nr.body_json
-        FROM execution_attempts a
-        JOIN task_node_revisions nr ON nr.id = a.task_node_revision_id
-        WHERE a.id = ? AND a.project_id = ? AND a.tree_id = ? AND a.status = 'succeeded'
-      `, input.skeletonGateEvidenceId ?? "", input.projectId, input.treeId);
-      const body = skeletonAttempt ? JSON.parse(skeletonAttempt.body_json) as { executionPhase?: string } : undefined;
-      if (body?.executionPhase !== "skeleton") {
-        throw new HarnessError("workflow_transition_rejected", "skeleton gate evidence must reference a succeeded skeleton Execution Attempt");
-      }
-      const currentNodes = this.database.all<{ status: string; body_json: string }>(`
-        SELECT n.status, nr.body_json
-        FROM task_nodes n
-        JOIN task_trees t ON t.id = n.tree_id
-        JOIN task_node_revisions nr ON nr.node_id = n.id AND nr.tree_revision_id = t.current_revision_id
-        WHERE n.tree_id = ?
-      `, input.treeId);
-      const skeletonNodes = currentNodes.filter((node) => (JSON.parse(node.body_json) as { executionPhase?: string }).executionPhase === "skeleton");
-      if (!skeletonNodes.length || skeletonNodes.some((node) => node.status !== "succeeded")) {
-        throw new HarnessError("workflow_transition_rejected", "every current skeleton Task Node must succeed before implementation");
-      }
-    }
     this.database.run("UPDATE workflow_states SET stage = ?, revision = revision + 1, updated_at = ? WHERE id = ?", input.to, nowIso(), workflow.id);
     return { stage: input.to, workflowRevision: workflow.revision + 1 };
   }

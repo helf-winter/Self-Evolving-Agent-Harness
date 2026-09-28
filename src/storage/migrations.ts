@@ -1068,4 +1068,31 @@ export const migrations: Migration[] = [{
       BEFORE DELETE ON semantic_evaluation_results
       BEGIN SELECT RAISE(ABORT, 'semantic evaluation results are immutable'); END;
   `,
+}, {
+  version: 16,
+  sql: `
+    CREATE TABLE skeleton_gate_results (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      workflow_revision INTEGER NOT NULL,
+      policy_version TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('passed', 'failed', 'uncertain')),
+      branch_results_json TEXT NOT NULL,
+      blockers_json TEXT NOT NULL,
+      attempt_ids_json TEXT NOT NULL,
+      evidence_trace_ids_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX skeleton_gate_result_history_idx
+      ON skeleton_gate_results(project_id, tree_id, created_at DESC, id DESC);
+
+    CREATE TRIGGER skeleton_gate_results_no_update
+      BEFORE UPDATE ON skeleton_gate_results
+      BEGIN SELECT RAISE(ABORT, 'skeleton gate results are immutable'); END;
+    CREATE TRIGGER skeleton_gate_results_no_delete
+      BEFORE DELETE ON skeleton_gate_results
+      BEGIN SELECT RAISE(ABORT, 'skeleton gate results are immutable'); END;
+  `,
 }];

@@ -11,7 +11,7 @@ describe("coding workflow", () => {
     expect(canTransitionWorkflow("skeleton_gate", "branch_implementation", {})).toEqual({
       ok: false,
       code: "workflow_transition_rejected",
-      reason: "skeleton gate evidence is required",
+      reason: "the Skeleton Gate is advanced only by deterministic Gate evaluation",
     });
   });
 });

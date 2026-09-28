@@ -17,6 +17,7 @@ import { TaskAffiliationService } from "./task-affiliation-service.js";
 import { resolveJevConfiguration } from "../domain/semantic-evaluation.js";
 import { JevEvaluationProvider } from "../bindings/typesafe/jev-evaluation-provider.js";
 import { SemanticEvaluationService } from "./semantic-evaluation-service.js";
+import { SkeletonGateService } from "./skeleton-gate-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -41,6 +42,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     executions: new NodeExecutionService(database),
     evaluations: new EvaluationService(database, failures, evolution, { semanticEvaluationRequired: jevConfiguration.enabled }),
     semanticEvaluations,
+    skeletonGates: new SkeletonGateService(database),
     failures,
     evolution,
     replacements,

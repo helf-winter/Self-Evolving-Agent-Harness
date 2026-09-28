@@ -332,6 +332,21 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     projectId: (await existingProject(cwd)).projectId, confirmationId, answer, answerTraceEventId, workflowRevision,
   })));
 
+  server.registerTool("harness_evaluate_skeleton_gate", {
+    description: "Evaluate the current revision's Skeleton Acceptance Criteria from persisted Attempt, Trace, Artifact, Contract, and Drift facts; only a passing result advances to branch implementation.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1), workflowRevision: z.number().int().min(0) },
+  }, ({ cwd, treeId, workflowRevision }) => guarded(async () => runtime.skeletonGates.evaluate({
+    projectId: (await existingProject(cwd)).projectId, treeId, workflowRevision,
+  })));
+
+  server.registerTool("harness_get_skeleton_gate_results", {
+    description: "List immutable Skeleton Gate results for the current Project, optionally narrowed to one Task Tree or result.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1).optional(), resultId: z.string().min(1).optional() },
+  }, ({ cwd, treeId, resultId }) => guarded(async () => runtime.skeletonGates.list(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(resultId ? { resultId } : {}) },
+  )));
+
   server.registerTool("harness_get_task_tree_summary", {
     description: "Get the current Task Tree revision, one-hop relations, Artifacts, and Trace count.",
     inputSchema: { cwd: cwdSchema, treeId: z.string() },

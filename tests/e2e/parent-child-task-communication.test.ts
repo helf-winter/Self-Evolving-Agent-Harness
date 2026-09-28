@@ -86,13 +86,10 @@ describe("Parent-child Task communication", () => {
         artifactCounts: { total: 1, planned: 1, actual: 0 },
       })]);
 
-      reopened.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 4, to: "skeleton_gate" });
-      reopened.workflows.transition({
-        projectId: project.projectId, treeId: root.treeId, workflowRevision: 5,
-        to: "branch_implementation", skeletonGateEvidenceId: childAttempt.attemptId,
-      });
-      reopened.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 6, to: "branch_verification" });
-      reopened.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 7, to: "root_verification" });
+      expect(reopened.skeletonGates.evaluate({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 4 }))
+        .toMatchObject({ status: "passed", workflow: { stage: "branch_implementation", revision: 5 } });
+      reopened.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 5, to: "branch_verification" });
+      reopened.workflows.transition({ projectId: project.projectId, treeId: root.treeId, workflowRevision: 6, to: "root_verification" });
       const parentAttempt = reopened.executions.startAttempt({
         projectId: project.projectId, nodeId: "parent", expectedTreeRevisionId: revision.revisionId,
       });
