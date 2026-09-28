@@ -308,14 +308,31 @@ npm test -- --run tests/integration/task-affiliation-service.test.ts tests/integ
 npm test -- --run tests/unit/semantic-evaluation.test.ts tests/unit/jev-evaluation-provider.test.ts tests/integration/semantic-evaluation-service.test.ts tests/integration/evaluation-service.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 18. 安全检查
+## 18. Skeleton Gate Evaluation
+
+创建一棵 `planningVersion: 1` Task Tree，其中顶层分支具有 Skeleton 节点、实际 Artifact、Artifact Contract、验证命令和完整 Skeleton Acceptance Criteria：
+
+1. 确认整棵树后立即调用 `harness_evaluate_skeleton_gate`；结果必须为 `failed`，列出缺少 Attempt / Artifact / Contract / 命令等 blocker，Workflow 保持 `skeleton_pass` 且 revision 不变。
+2. 仅把 planned Artifact 留在数据库或传入任意历史 Attempt；Gate 仍不得通过。
+3. 在当前 Skeleton Task Node Attempt 中由 Hook 记录文件形成和成功验证命令，将声明的 required evidence 绑定到 Attempt，并完成成功 Evaluation；再次评估必须为 `passed`，且 Workflow 原子进入 `branch_implementation`。
+4. 在评估前创建待处理 blocking Drift；结果必须含 `blocking_drift`，不得推进。处理 Drift 后重新评估，使用新的不可变结果。
+5. 修改 Task Tree 形成新 revision 后，不得使用旧 Gate Result 推进；stale Workflow revision 必须返回 `revision_conflict`。
+6. 重启后调用 `harness_get_skeleton_gate_results`；passed / failed / uncertain 历史、分支结果、Attempt 与 Trace 引用均应恢复。另一 Project 不得查询到这些结果。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/unit/skeleton-gate.test.ts tests/integration/skeleton-gate-service.test.ts tests/plugin/mcp.test.ts
+```
+
+## 19. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 19. 当前不作为验收失败的范围
+## 20. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；

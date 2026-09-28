@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.31 |
+| 文档版本 | v0.32 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -48,6 +48,7 @@
 | v0.29 | 2026-09-18 | 明确 Failure Case L0-L4 成熟度、Task Tree 中心渐进视图、Artifact 自适应粒度与 Relation Edge 的 Artifact 绑定矩阵 | Codex |
 | v0.30 | 2026-09-28 | 明确 Task Tree 归属确认必须持久化候选快照、Runtime Action、用户回答 Trace 与最终新建/归并结果 | Codex |
 | v0.31 | 2026-09-28 | 增加可选 Jev Evidence 语义评估、脱敏快照、失败关闭策略和确定性生命周期边界 | Codex |
+| v0.32 | 2026-09-28 | 明确 Skeleton Gate 的当前修订事实判定、不可变结果、失败留在 Skeleton Pass 和自动阶段推进语义 | Codex |
 
 ## 2. 项目概述
 
@@ -1226,6 +1227,8 @@ Skeleton Pass = completed
 允许进入 Branch Implementation
 ```
 
+Skeleton Gate 必须是 Runtime 的确定性状态边界，而不是 Agent 的自然语言完成声明。每次评估必须绑定当前 Task Tree Revision 与 Workflow Revision，并逐分支保存 Artifact、Contract、验证命令、Skeleton Attempt、Trace Evidence 和 blocking Drift 的观察结果。`passed` 结果可原子推进至 `branch_implementation`；`failed` 或 `uncertain` 结果不得改变执行阶段，应保留在 `skeleton_pass` 以便补齐骨架工作后重新评估。旧 revision 的 Gate 结果不得用于推进新 revision。
+
 Skeleton 阶段不要求全部业务功能测试通过。采用测试先行时，尚未实现功能对应的测试可以处于“已创建且预期失败”状态，但项目的基础构建、类型检查、测试发现与加载过程必须正常，预期失败必须被显式标注并关联相应 implementation 节点。
 
 可执行节点需要同时满足：
@@ -2216,10 +2219,24 @@ Planning Decision Record 只保存可向用户解释的决策信息，不保存�
 | required_contracts | 跨分支接口、数据结构、调用边界和依赖约定 |
 | verification_commands | 基础构建、类型检查、测试加载或其他结构验证命令 |
 | readiness_conditions | 允许进入该分支 implementation 的结构性条件 |
-| evidence_refs | Lifecycle Hooks 采集的文件、Artifact、命令和验证证据 |
-| gate_status | pending、running、passed、failed、blocked、uncertain |
-| failure_reason | Gate 未通过或无法判断的原因，可为空 |
-| evaluated_at | 最近判断时间 |
+
+Skeleton Acceptance Criteria 是 planning revision 中的不可变计划定义，不承载可变执行状态。执行事实由独立的 Skeleton Gate Result 保存。
+
+#### Skeleton Gate Result
+
+| 字段 | 描述 |
+| --- | --- |
+| skeleton_gate_result_id | 不可变 Gate 结果标识 |
+| project_id / task_tree_id | 严格限定的 Project 与 Task Tree |
+| task_tree_revision_id | 被评估的精确 Task Tree Revision |
+| workflow_revision | 发起评估时的 Workflow Revision |
+| policy_version | 确定性 Gate 策略版本；旧树兼容策略必须显式区分 |
+| status | passed、failed、uncertain |
+| branch_results | 每个已确认顶层分支的 Criterion、Skeleton Node、Artifact、Contract、命令和 readiness 观察结果 |
+| blocker_codes | 未通过或无法判断的确定性原因与引用 |
+| execution_attempt_ids | 支撑结果的当前 revision Skeleton Attempts |
+| evidence_trace_ids | 支撑结果的 Hook Trace Evidence |
+| created_at | 评估时间；结果不可更新或删除 |
 
 #### Task Relation Edge
 
@@ -2947,33 +2964,39 @@ Evaluation 接口不得直接写入 Task Node Status。状态变化必须提交�
 
 系统可以启用 Jev Evidence Semantic Evaluation。启用必须是显式配置，模型版本必须固定；API Key 只能从运行环境读取。接口应把每条 Required Evidence 拆为独立的结构化 Choice 判断，持久化概率、confidence、token、耗时和 snapshot hash。Provider 缺失、超时、错误、低置信度、人工复核或证据快照变化时，成功 Evaluation 必须 fail closed 为 `uncertain`。禁用时现有确定性 Evaluation 行为保持不变。
 
-### 8.12 Evolution 接口
+### 8.12 Skeleton Gate 接口
+
+系统必须提供当前 revision 的 Skeleton Gate 评估与历史结果查询接口。评估接口只允许在 `skeleton_pass` 调用，并携带 optimistic Workflow revision；它必须聚合当前确认范围内的 Skeleton Task Node、成功 Attempt、required evidence、Artifact 来源 Trace、Artifact Contract、验证命令和未解决 blocking Drift。
+
+对于结构化规划，每个已确认顶层分支都必须具有完整 Skeleton Acceptance Criteria。Artifact 仅因计划为 `planned` 不得视为已形成；命令仅因历史运行过不得视为当前 Skeleton 证据；Contract 必须属于当前 Artifact Graph revision 并具有 carrier 或 validation reference 证据。只有 `passed` 可以在同一事务中推进至 `branch_implementation`。`failed` 或 `uncertain` 必须保持 `skeleton_pass`，并返回可定位的 blocker codes。所有结果必须不可变、可重启恢复、按 Project 隔离。
+
+### 8.13 Evolution 接口
 
 系统需要支持从适用 Evaluation 序列生成 Experience、冻结 Skill Candidate Revision、Skill Test Case、Skill Validation Run、Skill Validation Report 和 Failure Case。
 
 测试生成接口与测试评判接口必须分离。Holdout 生成接口不得接收 Skill Candidate 的完整 instruction snapshot；验证接口必须支持 no-skill baseline、skill-enabled、重复运行、Oracle evidence、token / tool usage 和副作用对比。Promotion 接口只能接受通过 Test Case Quality Gate 的案例。
 
-### 8.13 用户交互接口
+### 8.14 用户交互接口
 
 系统需要允许用户查看、确认、修正或拒绝任务结果、Skill 候选和 Failure Case。
 
-### 8.14 Project Identity / Clone 接口
+### 8.15 Project Identity / Clone 接口
 
 系统需要支持读取、创建、验证和原子改写 Project Identity Marker，并返回 `same_project`、`moved_or_renamed`、`copy_detected`、`new_project`、`identity_conflict` 等确定性解析结果。
 
 Project Clone 接口必须在事务中创建目标 Project、复制允许克隆的数据、重写内部引用并生成 Project Clone Record。接口不得把源 Trace 复制成目标项目的新执行事实；必须明确区分 `source_provenance`、`inherited_evidence` 与 `target_execution_fact`。
 
-### 8.15 Composition / Replacement 接口
+### 8.16 Composition / Replacement 接口
 
 系统需要支持注册和查询 Plugin / Task Node 的 `provides`、`requires`、composition state 与 owned effects，并能计算依赖影响闭包。
 
 Task Node Replacement 接口必须支持 preview、confirm、execute、recover 四个阶段。preview 返回 contract diff、受影响节点和 Effect 风险；execute 只能在用户确认后进行；recover 必须优先恢复旧 revision，无法恢复时返回 `replacement_failed` 和人工处理证据。
 
-### 8.16 Effect Disposal 接口
+### 8.17 Effect Disposal 接口
 
 系统需要根据 Effect 分类返回 `auto_reversible`、`requires_baseline_check`、`compensation_only`、`manual_confirmation_required` 等处置能力。任何文件自动恢复都必须验证 owner、baseline hash / version 和后续写入冲突；外部不可逆 Effect 不得暴露自动 rollback 动作。
 
-### 8.17 Task Tree Refinement 接口
+### 8.18 Task Tree Refinement 接口
 
 系统需要支持对指定 tree、branch 或 subtree 执行 Plan Readiness Scan，返回 blocking issues、warnings、可解释的优先级依据和 recommended next issue。
 
@@ -2981,7 +3004,7 @@ Task Node Replacement 接口必须支持 preview、confirm、execute、recover �
 
 Runtime Action 接口必须对 `action_type`、`target_id`、`expected_revision`、`risk_level` 和 confirmation requirement 进行代码校验。Agent 的自然语言判断只能提出动作，不得绕过接口直接提交关键 Runtime State。
 
-### 8.18 Failure Case Reproduction 接口
+### 8.19 Failure Case Reproduction 接口
 
 系统需要支持从失败 Execution Attempt 创建 L0 Failure Case，为同一案例追加 manual、assisted、automated Reproduction Revision，并保留旧 revision 与验证证据。接口不得因复现方式变化而创建语义重复的 Failure Case。
 
@@ -2989,7 +3012,7 @@ Runtime Action 接口必须对 `action_type`、`target_id`、`expected_revision`
 
 成熟度晋升接口只能根据 Reproduction Validation Result 确定性推进 L0-L4；达到 L4 必须满足修复前稳定 RED、修复后稳定 GREEN、Oracle 有区分能力、重复执行稳定且隔离充分。容器只能作为可选 isolation strategy，接口不得把容器可用性作为所有案例晋升的通用前提。
 
-### 8.19 Tree-centered View Query 接口
+### 8.20 Tree-centered View Query 接口
 
 系统需要提供统一的 Tree-centered 查询模型，供图形 UI、CLI 与 Agent 对话复用。接口至少支持 `snapshot`、`summary`、`detail` 三种深度，以及 selected node、one-hop relation、global relation overlay、relation type、risk、status、artifact granularity 等过滤条件。
 
