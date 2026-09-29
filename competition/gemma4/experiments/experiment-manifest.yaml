@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "model": "gemma-4-31b-it-qat-w4a16-ct",
+  "limits": {
+    "timeout_seconds": 300,
+    "max_tool_calls": 40,
+    "max_time_minutes": 4,
+    "max_turns": 80
+  },
+  "variants": [
+    {
+      "id": "b0",
+      "source": "experiments/variants/b0",
+      "policy": "minimal"
+    },
+    {
+      "id": "b1",
+      "source": "experiments/variants/b1",
+      "policy": "evidence-first"
+    }
+  ]
+}

@@ -9,3 +9,14 @@ coverage/
 *.db-shm
 *.db-wal
 plugin/runtime/
+
+# Gemma 4 competition: local inputs, generated outputs, and credentials.
+/competition/gemma4/data/
+/competition/gemma4/downloads/
+/competition/gemma4/models/
+/competition/gemma4/results/
+/competition/gemma4/submission/
+/competition/gemma4/build/
+/competition/gemma4/*.zip
+/competition/gemma4/credentials*
+/competition/gemma4/.env*
