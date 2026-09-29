@@ -20,3 +20,5 @@ plugin/runtime/
 /competition/gemma4/*.zip
 /competition/gemma4/credentials*
 /competition/gemma4/.env*
+/competition/gemma4/**/__pycache__/
+/competition/gemma4/**/*.pyc

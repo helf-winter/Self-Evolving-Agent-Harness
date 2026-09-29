@@ -122,6 +122,8 @@ class ExperimentManifestTests(unittest.TestCase):
             "competition/gemma4/variant.zip",
             "competition/gemma4/credentials.json",
             "competition/gemma4/.env.local",
+            "competition/gemma4/scripts/__pycache__/module.cpython-313.pyc",
+            "competition/gemma4/tests/__pycache__/test_module.cpython-313.pyc",
         )
         for relative in ignored:
             with self.subTest(relative=relative):
