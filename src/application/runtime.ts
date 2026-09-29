@@ -20,6 +20,7 @@ import { SemanticEvaluationService } from "./semantic-evaluation-service.js";
 import { SkeletonGateService } from "./skeleton-gate-service.js";
 import { WorkflowPhaseService } from "./workflow-phase-service.js";
 import { FinalReportService } from "./final-report-service.js";
+import { VerificationFreshnessService } from "./verification-freshness-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -35,6 +36,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     jevConfiguration,
     new JevEvaluationProvider(jevConfiguration),
   );
+  const freshness = new VerificationFreshnessService(database);
   return {
     database,
     projects,
@@ -47,6 +49,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     skeletonGates: new SkeletonGateService(database),
     workflowPhases: new WorkflowPhaseService(database),
     finalReports: new FinalReportService(database),
+    freshness,
     failures,
     evolution,
     replacements,
@@ -54,7 +57,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     drifts,
     actions: new RuntimeActionService(database, drifts),
     queries: new RuntimeQueryService(database, { semanticEvaluation: semanticEvaluations.configuration() }),
-    hooks: new HookIngestionService(database, projects, drifts),
+    hooks: new HookIngestionService(database, projects, drifts, freshness),
     close: () => database.close(),
   };
 }

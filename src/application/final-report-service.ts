@@ -22,6 +22,12 @@ interface StatusCountRow {
   count: number;
 }
 
+interface VerificationInvalidationRow {
+  id: string;
+  invalidated_evaluation_ids_json: string;
+  invalidated_gate_result_ids_json: string;
+}
+
 export class FinalReportService {
   constructor(private readonly database: RuntimeDatabase) {}
 
@@ -159,16 +165,24 @@ export class FinalReportService {
       input.projectId, input.treeId,
     );
 
+    const invalidations = this.database.all<VerificationInvalidationRow>(`
+      SELECT id, invalidated_evaluation_ids_json, invalidated_gate_result_ids_json
+      FROM verification_invalidations
+      WHERE project_id = ? AND tree_id = ? AND tree_revision_id = ?
+      ORDER BY created_at, id
+    `, input.projectId, input.treeId, tree.current_revision_id);
+    const invalidatedEvaluationIds = new Set(invalidations.flatMap((row) => JSON.parse(row.invalidated_evaluation_ids_json) as string[]));
+    const invalidatedGateResultIds = new Set(invalidations.flatMap((row) => JSON.parse(row.invalidated_gate_result_ids_json) as string[]));
     const phaseGateResultIds = this.ids(`
       SELECT id FROM workflow_phase_gate_results
       WHERE project_id = ? AND tree_id = ? AND tree_revision_id = ? AND status = 'passed'
       ORDER BY created_at, id
-    `, input.projectId, input.treeId, tree.current_revision_id);
+    `, input.projectId, input.treeId, tree.current_revision_id).filter((id) => !invalidatedGateResultIds.has(id));
     const evaluationIds = this.ids(`
       SELECT e.id FROM evaluations e JOIN task_node_revisions nr ON nr.id = e.task_node_revision_id
       WHERE e.project_id = ? AND e.tree_id = ? AND nr.tree_revision_id = ? AND e.verdict = 'succeeded'
       ORDER BY e.created_at, e.id
-    `, input.projectId, input.treeId, tree.current_revision_id);
+    `, input.projectId, input.treeId, tree.current_revision_id).filter((id) => !invalidatedEvaluationIds.has(id));
     const traceEventIds = this.ids(`
       SELECT DISTINCT ae.trace_event_id AS id FROM execution_attempt_evidence ae
       JOIN execution_attempts a ON a.id = ae.attempt_id
@@ -199,9 +213,13 @@ export class FinalReportService {
         uncertain: evaluations.get("uncertain") ?? 0,
       },
       traces: { total: traceCount },
+      verificationFreshness: { invalidationCount: invalidations.length },
       unresolved: { activeAttempts, blockingDrifts, pendingConfirmations, pendingChanges },
     };
-    const evidenceRefs = { phaseGateResultIds, evaluationIds, traceEventIds, artifactIds };
+    const evidenceRefs = {
+      phaseGateResultIds, evaluationIds, traceEventIds, artifactIds,
+      verificationInvalidationIds: invalidations.map((row) => row.id),
+    };
     const reportId = newId();
     const createdAt = nowIso();
     this.database.run(`

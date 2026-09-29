@@ -6,6 +6,7 @@ import type { ClaudeHookEvent } from "../bindings/claude/hook-mapper.js";
 import type { RuntimeDatabase } from "../storage/database.js";
 import { PlanDriftService } from "./plan-drift-service.js";
 import type { ProjectIdentityService } from "./project-identity-service.js";
+import { VerificationFreshnessService } from "./verification-freshness-service.js";
 
 interface WorkflowContext {
   tree_id: string;
@@ -24,13 +25,16 @@ const executableStages = new Set(["skeleton_pass", "skeleton_gate", "branch_impl
 
 export class HookIngestionService {
   private readonly drifts: PlanDriftService;
+  private readonly freshness: VerificationFreshnessService;
 
   constructor(
     private readonly database: RuntimeDatabase,
     private readonly projects: ProjectIdentityService,
     drifts?: PlanDriftService,
+    freshness?: VerificationFreshnessService,
   ) {
     this.drifts = drifts ?? new PlanDriftService(database);
+    this.freshness = freshness ?? new VerificationFreshnessService(database);
   }
 
   async ingest(event: ClaudeHookEvent): Promise<
@@ -107,6 +111,15 @@ export class HookIngestionService {
           );
           if (event.eventName === "PostToolUse" && artifact.kind === "file" && this.isMutation(event) && workflow?.tree_id && workflow.selected_node_id) {
             this.recordAutomaticDrift(project.projectId, workflow.tree_id, workflow.selected_node_id, eventId, artifact);
+          }
+          if (event.eventName === "PostToolUse" && this.isMutation(event) && workflow?.tree_id) {
+            this.freshness.invalidateMutationWithinTransaction({
+              projectId: project.projectId,
+              treeId: workflow.tree_id,
+              sourceTraceEventId: eventId,
+              artifactId: artifact.artifactId,
+              ...(workflow.selected_node_id ? { fallbackNodeId: workflow.selected_node_id } : {}),
+            });
           }
         }
       }

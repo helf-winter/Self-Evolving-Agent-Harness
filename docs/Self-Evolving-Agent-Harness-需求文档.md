@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.34 |
+| 文档版本 | v0.35 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -51,6 +51,7 @@
 | v0.32 | 2026-09-28 | 明确 Skeleton Gate 的当前修订事实判定、不可变结果、失败留在 Skeleton Pass 和自动阶段推进语义 | Codex |
 | v0.33 | 2026-09-28 | 增加活动分支、分支进度与 implementation / branch verification / root verification 确定性阶段 Gate | Codex |
 | v0.34 | 2026-09-29 | 增加不可变 Final Report、确定性完成门禁和 Task Tree 原子收口语义 | Codex |
+| v0.35 | 2026-09-29 | 增加验证证据新鲜度、Artifact 影响传播、不可变 Verification Invalidation 与 Workflow 确定性回退 | Codex |
 
 ## 2. 项目概述
 
@@ -921,6 +922,10 @@ Task Node Status（当前运行状态）
 | 任意 verdict | Evaluation 属于旧 revision | 不推进当前状态；当前节点保持或进入 `needs_revalidation` |
 
 Evaluation Result 不得覆盖。相同 Task Node 的重试必须创建新的 Execution Attempt，并保留完整序列，例如 `failed → failed → succeeded`，供 Evaluation 审计与 Evolution 判断使用。
+
+Evaluation 和阶段 Gate 还必须满足证据新鲜度。成功验证后发生真实 mutation 时，Runtime 应依据当前 revision 的 Artifact Relation、Task–Artifact Link、Task Relation、分支边界和父级 verification 关系计算影响范围，并创建不可变 Verification Invalidation。旧 Evaluation 与 Gate 不得修改或删除，但不得继续作为当前完成证据；受影响成功节点进入 `needs_revalidation`，Workflow 回退到最早必要阶段。
+
+实现节点失效时，同一分支中依赖它的 verification 节点必须同时失效；共享 Contract 或共享 Artifact 变化必须传播到所有相关分支；父级和根 verification 节点必须重新验证。仍在运行的同阶段 implementation Attempt 可以继续，但其之前的成功证据不得复用；如果较早阶段变化使正在运行的 verification Attempt 失去依据，该 Attempt 必须确定性中止并保留历史。
 
 父 Task Node 的状态不得仅由子节点状态聚合为成功。所有必要子节点完成后，仍需针对父级目标、跨分支契约和集成验收生成父级 Evaluation；只有父级 Lifecycle Transition Policy 通过后才能进入 `succeeded`。
 
@@ -2280,6 +2285,19 @@ Skeleton Acceptance Criteria 是 planning revision 中的不可变计划定义�
 | idempotency_key | 同一完成请求安全重试的稳定键 |
 | created_at | 创建时间；报告不可更新或删除 |
 
+#### Verification Invalidation
+
+| 字段 | 描述 |
+| --- | --- |
+| verification_invalidation_id | 不可变失效事实标识 |
+| project_id / task_tree_id / task_tree_revision_id | 失效发生时的严格 Project、Tree 与 revision 归属 |
+| source_trace_event_id / artifact_id | 引发失效的真实 mutation Trace 与工程资产 |
+| workflow_revision / prior_stage / next_stage | 失效前 Workflow 版本、原阶段与确定性回退阶段 |
+| affected_node_ids | 需要重新验证的直接节点、共享 Contract 消费节点、下游 verification 节点和父级 verification 节点 |
+| invalidated_evaluation_ids | 仍保留但不得作为当前完成证据的 Evaluation |
+| invalidated_gate_result_ids | 仍保留但不得作为当前完成证据的阶段 Gate |
+| created_at | 失效事实形成时间；记录不可更新或删除 |
+
 #### Task Relation Edge
 
 | 字段 | 描述 |
@@ -3021,6 +3039,12 @@ root verification 通过只允许 Workflow 进入 `final_report`，不得直接�
 ### 8.12.1 Final Report 接口
 
 `harness_finalize_task_tree` 必须接收 Task Tree、当前 Workflow revision 与稳定 idempotency key，并返回不可变 Final Report、确定性摘要和证据引用。`harness_get_final_reports` 必须按当前 Project 隔离查询，并可按 Task Tree 过滤。所有旧 revision、跨 Project、非 `final_report` 阶段或存在完成阻塞项的请求都必须拒绝，且不得留下部分写入。
+
+### 8.12.2 Verification Freshness 接口
+
+Runtime Binding 在成功 mutation Hook 事实形成后必须执行证据新鲜度判断。该判断不得依赖 Agent 自由文本；它必须根据当前 revision 的 Artifact 和 Task 关系确定受影响节点、失效证据与最早回退阶段，并与 Trace、Artifact 投影、节点状态和 Workflow revision 在同一事务中提交。
+
+系统必须提供 `harness_get_verification_invalidations`，按当前 Project 查询不可变失效历史，并可按 Task Tree 或 invalidation ID 过滤。Final Report 必须排除所有被 invalidation 引用的旧 Evaluation / Gate，同时保留 invalidation 引用和数量，以说明重新验证链路。
 
 ### 8.13 Evolution 接口
 

@@ -448,6 +448,18 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     { ...(treeId ? { treeId } : {}), ...(reportId ? { reportId } : {}) },
   )));
 
+  server.registerTool("harness_get_verification_invalidations", {
+    description: "List immutable verification invalidations caused by project mutations after evidence-backed verification.",
+    inputSchema: {
+      cwd: cwdSchema,
+      treeId: z.string().min(1).optional(),
+      invalidationId: z.string().min(1).optional(),
+    },
+  }, ({ cwd, treeId, invalidationId }) => guarded(async () => runtime.freshness.list(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(invalidationId ? { invalidationId } : {}) },
+  )));
+
   server.registerTool("harness_get_artifact_graph", {
     description: "Get the current project-scoped Artifact Graph with task links, relations, contracts, and pagination.",
     inputSchema: {

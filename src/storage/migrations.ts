@@ -1167,4 +1167,31 @@ export const migrations: Migration[] = [{
       BEFORE DELETE ON final_reports
       BEGIN SELECT RAISE(ABORT, 'final reports are immutable'); END;
   `,
+}, {
+  version: 19,
+  sql: `
+    CREATE TABLE verification_invalidations (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      source_trace_event_id TEXT NOT NULL UNIQUE REFERENCES trace_events(id) ON DELETE RESTRICT,
+      artifact_id TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+      workflow_revision INTEGER NOT NULL,
+      prior_stage TEXT NOT NULL,
+      next_stage TEXT NOT NULL,
+      affected_node_ids_json TEXT NOT NULL,
+      invalidated_evaluation_ids_json TEXT NOT NULL,
+      invalidated_gate_result_ids_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX verification_invalidation_history_idx
+      ON verification_invalidations(project_id, tree_id, created_at DESC, id DESC);
+    CREATE TRIGGER verification_invalidations_no_update
+      BEFORE UPDATE ON verification_invalidations
+      BEGIN SELECT RAISE(ABORT, 'verification invalidations are immutable'); END;
+    CREATE TRIGGER verification_invalidations_no_delete
+      BEFORE DELETE ON verification_invalidations
+      BEGIN SELECT RAISE(ABORT, 'verification invalidations are immutable'); END;
+  `,
 }];

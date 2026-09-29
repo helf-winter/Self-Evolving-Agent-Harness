@@ -19,6 +19,8 @@ Report separately:
 
 Never report success from planned state alone, and never substitute a code diff for execution evidence when the contract requires a test or command result.
 
+Before final reporting, inspect `harness_get_verification_invalidations`. A later mutation can invalidate an otherwise successful Evaluation, branch Gate, or root Gate. Follow the rewound Workflow stage and create fresh Attempts and evidence; invalidated IDs remain historical facts and must not be cited as current completion evidence.
+
 When an applied Evaluation fails, query `harness_get_failure_cases`. The Runtime automatically preserves the first observation as an L0 Failure Case and keeps later matching occurrences separate. If the failure is useful for future diagnosis or regression, append a structured reproduction with `harness_add_failure_reproduction` rather than creating a second semantic duplicate.
 
 Reproduction authoring and validation are different responsibilities. An Agent may draft preconditions, fixture/setup/reproduction/cleanup steps, an Oracle, command, timeout, isolation strategy, baselines, and repeat policy. It must not mark its own prose as verified. Run the declared procedure through normal tools so Hooks create actual Trace evidence, then submit those evidence IDs through `harness_validate_failure_reproduction`.

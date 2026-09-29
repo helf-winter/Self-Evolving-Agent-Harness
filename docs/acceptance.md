@@ -359,14 +359,31 @@ npm test -- --run tests/integration/skeleton-gate-service.test.ts tests/integrat
 npm test -- --run tests/integration/final-report-service.test.ts tests/integration/task-tree-service.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 21. 安全检查
+## 21. Verification Freshness & Invalidation
+
+在一个具有两个已验证分支、共享 Contract Artifact 且根验证已通过的 Task Tree 中执行真实文件 mutation：
+
+1. Hook 必须原子写入 mutation Trace、Artifact 投影和不可变 Verification Invalidation；查询结果必须包含来源 Trace、当前 revision、Artifact、受影响节点以及失效的 Evaluation / Gate ID。
+2. 修改实现 Artifact 时，直接实现节点、同分支 verification 节点、依赖同一 Contract 的其他分支节点和根 verification 节点必须进入 `needs_revalidation`；纯读取和失败的工具调用不得触发失效。
+3. Workflow 必须回退到最早受影响阶段，按原 branch order 激活第一个受影响分支；未受影响分支保持原事实，旧 Evaluation / Gate 不更新、不删除。
+4. 后续分支正在执行 implementation Attempt 时，修改共享 Artifact 不得中止该同阶段 Attempt；但较早阶段变化若使正在执行的 verification Attempt 失去依据，该 Attempt 必须转为 `aborted` 并保留完成时间。
+5. 未重新完成全部受影响节点、分支和根 Gate 前，Final Report 必须拒绝；重新验证后报告只能引用未失效成功证据，并保留 invalidation ID 和数量。
+6. 重启后 `harness_get_verification_invalidations` 必须恢复相同事实；另一 Project 不得读取。直接更新或删除 invalidation 必须失败。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/final-report-service.test.ts tests/integration/hook-ingestion.test.ts tests/plugin/mcp.test.ts
+```
+
+## 22. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 22. 当前不作为验收失败的范围
+## 23. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
