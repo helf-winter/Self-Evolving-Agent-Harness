@@ -8,7 +8,7 @@
 | --- | --- |
 | 项目名称 | Self-Evolving Agent Harness |
 | 文档名称 | 软件需求规格说明书 |
-| 文档版本 | v0.33 |
+| 文档版本 | v0.34 |
 | 创建日期 | 2026-09-13 |
 | 作者 | 项目发起人、Codex |
 | 状态 | 草稿 |
@@ -50,6 +50,7 @@
 | v0.31 | 2026-09-28 | 增加可选 Jev Evidence 语义评估、脱敏快照、失败关闭策略和确定性生命周期边界 | Codex |
 | v0.32 | 2026-09-28 | 明确 Skeleton Gate 的当前修订事实判定、不可变结果、失败留在 Skeleton Pass 和自动阶段推进语义 | Codex |
 | v0.33 | 2026-09-28 | 增加活动分支、分支进度与 implementation / branch verification / root verification 确定性阶段 Gate | Codex |
+| v0.34 | 2026-09-29 | 增加不可变 Final Report、确定性完成门禁和 Task Tree 原子收口语义 | Codex |
 
 ## 2. 项目概述
 
@@ -2265,6 +2266,20 @@ Skeleton Acceptance Criteria 是 planning revision 中的不可变计划定义�
 | next_stage / next_branch_task_node_id | 通过时的下一阶段与下一活动分支 |
 | created_at | 评估时间；结果不可更新或删除 |
 
+#### Final Report
+
+| 字段 | 描述 |
+| --- | --- |
+| final_report_id | 不可变最终报告标识 |
+| project_id / task_tree_id | 严格限定的 Project 与 Task Tree |
+| task_tree_revision_id / workflow_revision | 完成时绑定的精确树与 Workflow 版本 |
+| root_phase_gate_result_id | 支撑完成结论的当前 revision 根验证 Gate |
+| status | completed；不使用 Agent 自由文本决定状态 |
+| summary | 由当前 Task、Branch、Attempt、Drift、Confirmation、Change、Artifact、Evaluation 与 Trace 事实确定性聚合的摘要 |
+| evidence_refs | 支撑完成结论的 Gate、Evaluation、Trace 与 Artifact 稳定引用 |
+| idempotency_key | 同一完成请求安全重试的稳定键 |
+| created_at | 创建时间；报告不可更新或删除 |
+
 #### Task Relation Edge
 
 | 字段 | 描述 |
@@ -2998,6 +3013,14 @@ Evaluation 接口不得直接写入 Task Node Status。状态变化必须提交�
 对于结构化规划，每个已确认顶层分支都必须具有完整 Skeleton Acceptance Criteria。Artifact 仅因计划为 `planned` 不得视为已形成；命令仅因历史运行过不得视为当前 Skeleton 证据；Contract 必须属于当前 Artifact Graph revision 并具有 carrier 或 validation reference 证据。只有 `passed` 可以在同一事务中推进至 `branch_implementation`。`failed` 或 `uncertain` 必须保持 `skeleton_pass`，并返回可定位的 blocker codes。所有结果必须不可变、可重启恢复、按 Project 隔离。
 
 Skeleton Gate 通过时必须初始化当前 revision 的 Workflow Branch State 并选择第一个活动分支。系统必须提供 Workflow Phase Gate 接口，按活动分支依次校验 implementation 与 verification 节点；分支验证完成后自动选择下一个 pending 分支，全部完成后进入 root verification。root verification 只允许根 Task Node，并要求独立 Evaluation。任何阶段缺少声明的 verification 节点时返回 `uncertain`，不得静默跳过。
+
+root verification 通过只允许 Workflow 进入 `final_report`，不得直接把 Task Tree 标记为完成。系统必须提供 Final Report 完成接口与历史查询接口；完成接口必须绑定当前 Task Tree revision、Workflow revision 和 passed root verification Gate，并确定性校验所有当前节点成功、所有分支 verified，且不存在 active Attempt、blocking Drift、待处理 Confirmation 或待应用 Change Request。
+
+完成门禁通过时，系统必须在同一事务中创建不可变 Final Report、把 Task Tree 标记为 `completed` 并停用 Workflow；任一步失败必须整体回滚。报告内容必须由 Runtime 事实聚合，Agent 自由文本不得作为完成依据。接口必须支持 idempotency key：相同请求重试返回同一报告，冲突参数不得复用该键。完成后的 Task Tree 必须可继续选择和查询，但不得重新激活执行 Workflow 或产生新的可写执行状态。
+
+### 8.12.1 Final Report 接口
+
+`harness_finalize_task_tree` 必须接收 Task Tree、当前 Workflow revision 与稳定 idempotency key，并返回不可变 Final Report、确定性摘要和证据引用。`harness_get_final_reports` 必须按当前 Project 隔离查询，并可按 Task Tree 过滤。所有旧 revision、跨 Project、非 `final_report` 阶段或存在完成阻塞项的请求都必须拒绝，且不得留下部分写入。
 
 ### 8.13 Evolution 接口
 

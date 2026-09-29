@@ -19,6 +19,7 @@ import { JevEvaluationProvider } from "../bindings/typesafe/jev-evaluation-provi
 import { SemanticEvaluationService } from "./semantic-evaluation-service.js";
 import { SkeletonGateService } from "./skeleton-gate-service.js";
 import { WorkflowPhaseService } from "./workflow-phase-service.js";
+import { FinalReportService } from "./final-report-service.js";
 
 export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
   const database = new RuntimeDatabase(path.join(resolveDataHome(environment), "runtime.db"));
@@ -45,6 +46,7 @@ export function openRuntime(environment: NodeJS.ProcessEnv = process.env) {
     semanticEvaluations,
     skeletonGates: new SkeletonGateService(database),
     workflowPhases: new WorkflowPhaseService(database),
+    finalReports: new FinalReportService(database),
     failures,
     evolution,
     replacements,

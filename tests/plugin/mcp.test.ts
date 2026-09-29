@@ -32,6 +32,7 @@ describe("Harness MCP binding", () => {
       "harness_evaluate_attempt_semantics", "harness_get_semantic_evaluations",
       "harness_evaluate_skeleton_gate", "harness_get_skeleton_gate_results",
       "harness_evaluate_workflow_phase", "harness_get_workflow_phase_results",
+      "harness_finalize_task_tree", "harness_get_final_reports",
       "harness_get_artifact_graph", "harness_get_artifact_detail", "harness_get_plan_drift_summary",
       "harness_record_plan_drift",
       "harness_get_waiting_items", "harness_get_user_change_requests", "harness_get_runtime_action_detail",
@@ -74,6 +75,12 @@ describe("Harness MCP binding", () => {
     });
     expect(tools.find((tool) => tool.name === "harness_evaluate_workflow_phase")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["treeId", "workflowRevision"]),
+    });
+    expect(tools.find((tool) => tool.name === "harness_finalize_task_tree")?.inputSchema).toMatchObject({
+      required: expect.arrayContaining(["treeId", "workflowRevision", "idempotencyKey"]),
+    });
+    expect(tools.find((tool) => tool.name === "harness_get_final_reports")?.inputSchema).toMatchObject({
+      properties: { treeId: { type: "string" }, reportId: { type: "string" } },
     });
     expect(tools.find((tool) => tool.name === "harness_apply_draft_change_set")?.inputSchema).toMatchObject({
       required: expect.arrayContaining(["sourceUserMessageTraceEventId", "decision"]),

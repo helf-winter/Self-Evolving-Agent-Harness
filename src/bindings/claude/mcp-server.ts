@@ -430,6 +430,24 @@ export function createMcpServer(environment: NodeJS.ProcessEnv = process.env) {
     ...(treeId ? { treeId } : {}), ...(nodeId ? { nodeId } : {}), ...(runId ? { runId } : {}), ...(limit ? { limit } : {}), ...(cursor ? { cursor } : {}),
   })));
 
+  server.registerTool("harness_finalize_task_tree", {
+    description: "Create the immutable fact-backed final report and atomically complete the Task Tree after all lifecycle gates pass.",
+    inputSchema: {
+      cwd: cwdSchema, treeId: z.string().min(1), workflowRevision: z.number().int().min(0),
+      idempotencyKey: z.string().min(1),
+    },
+  }, ({ cwd, treeId, workflowRevision, idempotencyKey }) => guarded(async () => runtime.finalReports.finalize({
+    projectId: (await existingProject(cwd)).projectId, treeId, workflowRevision, idempotencyKey,
+  })));
+
+  server.registerTool("harness_get_final_reports", {
+    description: "List immutable final lifecycle reports for the current Project.",
+    inputSchema: { cwd: cwdSchema, treeId: z.string().min(1).optional(), reportId: z.string().min(1).optional() },
+  }, ({ cwd, treeId, reportId }) => guarded(async () => runtime.finalReports.list(
+    (await existingProject(cwd)).projectId,
+    { ...(treeId ? { treeId } : {}), ...(reportId ? { reportId } : {}) },
+  )));
+
   server.registerTool("harness_get_artifact_graph", {
     description: "Get the current project-scoped Artifact Graph with task links, relations, contracts, and pagination.",
     inputSchema: {

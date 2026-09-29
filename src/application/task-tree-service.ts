@@ -368,6 +368,12 @@ export class TaskTreeService {
       }
       const previousSelectedTreeId = this.selectedTreeId(input.projectId);
       if (previousSelectedTreeId === tree.id) {
+        if (tree.status === "completed") {
+          this.database.run(
+            "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND tree_id = ? AND active = 1",
+            nowIso(), input.projectId, tree.id,
+          );
+        }
         return {
           treeId: tree.id, title: tree.title, status: tree.status, selected: true,
           previousSelectedTreeId, selectedTreeId: tree.id, transitionId: null,
@@ -382,12 +388,14 @@ export class TaskTreeService {
         "UPDATE workflow_states SET active = 0, updated_at = ? WHERE project_id = ? AND active = 1",
         timestamp, input.projectId,
       );
-      const workflow = this.database.get<{ id: string }>(
-        "SELECT id FROM workflow_states WHERE project_id = ? AND tree_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
-        input.projectId, tree.id,
-      );
-      if (!workflow) throw new HarnessError("task_tree_transition_rejected", "Task Tree has no resumable workflow state");
-      this.database.run("UPDATE workflow_states SET active = 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
+      if (tree.status !== "completed") {
+        const workflow = this.database.get<{ id: string }>(
+          "SELECT id FROM workflow_states WHERE project_id = ? AND tree_id = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+          input.projectId, tree.id,
+        );
+        if (!workflow) throw new HarnessError("task_tree_transition_rejected", "Task Tree has no resumable workflow state");
+        this.database.run("UPDATE workflow_states SET active = 1, updated_at = ? WHERE id = ?", timestamp, workflow.id);
+      }
       this.upsertRuntimeSelection(input.projectId, tree.id, rootNodeId, timestamp);
       this.database.run("UPDATE task_trees SET updated_at = ? WHERE id = ?", timestamp, tree.id);
       const transitionId = this.appendCollectionTransition({
@@ -657,6 +665,9 @@ export class TaskTreeService {
   private assertTreeMutable(tree: TreeRow): void {
     if (tree.status === "archived") {
       throw new HarnessError("task_tree_transition_rejected", "archived Task Trees are read-only until restored");
+    }
+    if (tree.status === "completed") {
+      throw new HarnessError("task_tree_transition_rejected", "completed Task Trees are immutable execution records");
     }
   }
 

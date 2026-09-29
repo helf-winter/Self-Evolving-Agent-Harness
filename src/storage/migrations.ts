@@ -1140,4 +1140,31 @@ export const migrations: Migration[] = [{
       BEFORE DELETE ON workflow_phase_gate_results
       BEGIN SELECT RAISE(ABORT, 'workflow phase gate results are immutable'); END;
   `,
+}, {
+  version: 18,
+  sql: `
+    CREATE TABLE final_reports (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      tree_id TEXT NOT NULL REFERENCES task_trees(id) ON DELETE CASCADE,
+      tree_revision_id TEXT NOT NULL REFERENCES task_tree_revisions(id) ON DELETE RESTRICT,
+      workflow_revision INTEGER NOT NULL,
+      root_phase_gate_result_id TEXT NOT NULL REFERENCES workflow_phase_gate_results(id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status = 'completed'),
+      summary_json TEXT NOT NULL,
+      evidence_refs_json TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, idempotency_key),
+      UNIQUE(tree_id, tree_revision_id)
+    );
+    CREATE INDEX final_report_history_idx
+      ON final_reports(project_id, tree_id, created_at DESC, id DESC);
+    CREATE TRIGGER final_reports_no_update
+      BEFORE UPDATE ON final_reports
+      BEGIN SELECT RAISE(ABORT, 'final reports are immutable'); END;
+    CREATE TRIGGER final_reports_no_delete
+      BEFORE DELETE ON final_reports
+      BEGIN SELECT RAISE(ABORT, 'final reports are immutable'); END;
+  `,
 }];

@@ -1659,6 +1659,8 @@ export class RuntimeQueryService {
             ? ["execute_skeleton", "evaluate_skeleton_gate", "inspect_detail"]
             : stage === "branch_implementation" || stage === "branch_verification" || stage === "root_verification"
               ? ["execute_phase_nodes", "evaluate_workflow_phase", "inspect_detail", "record_evidence"]
+              : stage === "final_report"
+                ? ["finalize_task_tree", "inspect_detail"]
             : ["inspect_detail", "record_evidence"];
     return pendingAffiliation
       ? ["resolve_task_affiliation", "inspect_task_affiliations", ...stageActions]

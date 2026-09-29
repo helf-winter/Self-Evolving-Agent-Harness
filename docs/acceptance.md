@@ -342,14 +342,31 @@ npm test -- --run tests/unit/skeleton-gate.test.ts tests/integration/skeleton-ga
 npm test -- --run tests/integration/skeleton-gate-service.test.ts tests/integration/node-execution-service.test.ts tests/plugin/mcp.test.ts
 ```
 
-## 20. 安全检查
+## 20. Final Report & Task Tree Completion
+
+使用已经完成全部分支验证和根验证的 Task Tree 进入 `final_report`：
+
+1. Snapshot 必须只给出 `finalize_task_tree` 与 `inspect_detail`，不得把阶段名直接视为已完成。
+2. 携带当前 Workflow revision 与稳定 idempotency key 调用 `harness_finalize_task_tree`；返回报告必须绑定 Project、Task Tree revision、Workflow revision、root Gate，并包含由 Task、Branch、Artifact、Evaluation 与 Trace 事实聚合的摘要和 evidence refs。
+3. 同一事务提交后，Task Tree 必须为 `completed`，Workflow 必须停用；重启后 `harness_get_final_reports` 可恢复同一不可变报告，完成树仍可选择查看但不得重新激活 Workflow。
+4. 使用相同 idempotency key 重试必须返回同一报告；同一 key 配合不同参数、旧 revision、错误 Project 或非 `final_report` 阶段必须拒绝。
+5. 分别制造 active Attempt、blocking Drift、待处理 Confirmation 和待应用 Change Request；Finalization 必须失败，且不得留下报告或部分完成状态。
+6. 人为触发 Task Tree 状态更新失败；Final Report 插入必须随事务回滚。
+
+自动回归入口：
+
+```bash
+npm test -- --run tests/integration/final-report-service.test.ts tests/integration/task-tree-service.test.ts tests/plugin/mcp.test.ts
+```
+
+## 21. 安全检查
 
 - 在 Hook 输入的 `apiKey`、`authorization`、`token`、`cookie` 或 `password` 字段中放入测试字符串；数据库 Trace 中只能出现 `[REDACTED]`。
 - 在未确认范围时触发实质变更；Trace 应出现 `workflow_violation`，工具本身不应被 Harness 阻塞。
 - 将一个项目的 marker 复制到另一个仍存在的目录；inspect 应返回 `copy_detected`，持久化时必须创建独立 Project，不得共享可写状态。
 - 篡改 marker 的 `identity_token` 或填写未知 `project_id`；解析结果应为 `identity_conflict`，不得读取或改写现有 Project。
 
-## 21. 当前不作为验收失败的范围
+## 22. 当前不作为验收失败的范围
 
 - 完整 AST/符号调用图；
 - Codex 等其他 Agent Runtime Binding；
