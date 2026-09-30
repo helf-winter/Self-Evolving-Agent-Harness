@@ -61,6 +61,8 @@ npm ci
 npm run check
 ```
 
+`npm run check` 会同时执行类型检查、全量测试、插件测试以及当前 Claude Code 提供的官方 `claude plugin validate`；因此应在实际运行 Harness 的 WSL/Bash Node 环境中执行，且该环境必须能找到满足最低版本要求的 `claude` 命令。
+
 让 `harness` 命令在当前 Node 环境全局可用：
 
 ```bash

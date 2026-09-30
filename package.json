@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "plugin:validate": "npm run build && vitest run tests/plugin",
+    "plugin:validate:official": "claude plugin validate ./plugin",
+    "plugin:validate": "npm run build && npm run plugin:validate:official && vitest run tests/plugin",
     "check": "npm run typecheck && npm test && npm run plugin:validate"
   },
   "dependencies": {
